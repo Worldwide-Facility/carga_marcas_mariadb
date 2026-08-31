@@ -15,14 +15,14 @@ steps:
     args:
       - 'build'
       - '-t'
-      - '${_IMAGE}:${SHORT_SHA}'
+      - '${_IMAGE}:$BUILD_ID'
       - '-t'
       - '${_IMAGE}:latest'
       - '.'
 
   - name: 'gcr.io/cloud-builders/docker'
     id: 'push-sha'
-    args: ['push', '${_IMAGE}:${SHORT_SHA}']
+    args: ['push', '${_IMAGE}:$BUILD_ID']
 
   - name: 'gcr.io/cloud-builders/docker'
     id: 'push-latest'
@@ -37,7 +37,7 @@ steps:
         set -e
         JOB="${_JOB}"
         REGION="${_REGION}"
-        IMAGE="${_IMAGE}:${SHORT_SHA}"
+        IMAGE="${_IMAGE}:$BUILD_ID"
         ENV_VARS="${_ENV_BASE}"
         SECRETS="${_SECRETS}"
         SA="${_SA}"
@@ -84,7 +84,7 @@ steps:
             --uri="$${URI}" \
             --http-method=POST \
             --oauth-service-account-email="$${SA}" \
-            --attempt-deadline=3600s \
+            --attempt-deadline=1800s \
             --description="MariaDB marcas -> BigQuery marcas_mariadb cada 4 h"
         else
           echo "Creando scheduler $${SCH}"
@@ -95,13 +95,13 @@ steps:
             --uri="$${URI}" \
             --http-method=POST \
             --oauth-service-account-email="$${SA}" \
-            --attempt-deadline=3600s \
+            --attempt-deadline=1800s \
             --description="MariaDB marcas -> BigQuery marcas_mariadb cada 4 h"
         fi
     waitFor: ['deploy-job']
 
 images:
-  - '${_IMAGE}:${SHORT_SHA}'
+  - '${_IMAGE}:$BUILD_ID'
   - '${_IMAGE}:latest'
 
 options:

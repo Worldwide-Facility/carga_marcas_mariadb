@@ -1,6 +1,6 @@
 # Carga MariaDB `marcas` → BigQuery
 
-Destino: `worldwide-470917.cr_reportes.marcas_mariadb` (WRITE_TRUNCATE).
+Destino: `worldwide-470917.cr_reportes.marcas_mariadb` (WRITE_TRUNCATE, `PARTITION BY DATE(fecha)`).
 
 Repo: https://github.com/wwdiegovarela/carga_marcas_mariadb
 

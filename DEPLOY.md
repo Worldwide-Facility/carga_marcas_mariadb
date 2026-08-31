@@ -21,10 +21,31 @@ python main.py sync
 - Scheduler: `carga-marcas-mariadb-schedule` — `0 */4 * * *` America/Santiago
 - Secretos: `carga-marcas-mariadb-user`, `carga-marcas-mariadb-password`
 
-Push a `main` dispara Cloud Build (`cloudbuild.yaml`): construye la imagen, actualiza el job y el scheduler.
+### Conectar el repo a Cloud Build (una vez)
+
+El GitHub App de Cloud Build todavía no ve este repositorio. Enlazalo aquí:
+
+https://console.cloud.google.com/cloud-build/triggers;region=us-east1/connect?project=worldwide-470917
+
+Elige GitHub → `wwdiegovarela/carga_marcas_mariadb`. Después:
 
 ```bash
-# Primera vez (secretos + IAM + trigger): ver scripts/bootstrap_gcp.sh
+gcloud builds triggers create github \
+  --name=carga-marcas-mariadb \
+  --repo-owner=wwdiegovarela \
+  --repo-name=carga_marcas_mariadb \
+  --branch-pattern="^main$" \
+  --build-config=cloudbuild.yaml \
+  --region=us-east1 \
+  --project=worldwide-470917 \
+  --service-account=projects/worldwide-470917/serviceAccounts/webscrapper@worldwide-470917.iam.gserviceaccount.com \
+  --description="MariaDB marcas -> BigQuery cada push a main"
+```
+
+Push a `main` (con el trigger ya creado) reconstruye la imagen y actualiza el job.
+
+```bash
+# Primera vez (secretos + IAM): scripts/bootstrap_gcp.sh
 gcloud builds submit --config cloudbuild.yaml --project worldwide-470917
 
 # Correr ahora

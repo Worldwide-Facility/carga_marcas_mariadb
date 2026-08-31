@@ -1,0 +1,111 @@
+# Push a main → imagen + Cloud Run Job + Cloud Scheduler cada 4 h.
+# Secretos MARIADB_USER / MARIADB_PASSWORD se adjuntan al job; no van en este YAML.
+
+substitutions:
+  _REGION: us-east1
+  _JOB: carga-marcas-mariadb
+  _SCHEDULER: carga-marcas-mariadb-schedule
+  _SA: cargar-cr@worldwide-470917.iam.gserviceaccount.com
+  _IMAGE: gcr.io/worldwide-470917/carga-marcas-mariadb
+  _ENV_BASE: 'GCP_PROJECT_ID=worldwide-470917,BQ_DATASET=cr_reportes,BQ_TABLE=marcas_mariadb,BQ_WRITE_DISPOSITION=WRITE_TRUNCATE,MARIADB_HOST=201.236.154.66,MARIADB_PORT=65500,MARIADB_DATABASE=worldwide,MARIADB_TABLE=marcas'
+  _SECRETS: 'MARIADB_USER=carga-marcas-mariadb-user:latest,MARIADB_PASSWORD=carga-marcas-mariadb-password:latest'
+
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - '${_IMAGE}:${SHORT_SHA}'
+      - '-t'
+      - '${_IMAGE}:latest'
+      - '.'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'push-sha'
+    args: ['push', '${_IMAGE}:${SHORT_SHA}']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'push-latest'
+    args: ['push', '${_IMAGE}:latest']
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'deploy-job'
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -e
+        JOB="${_JOB}"
+        REGION="${_REGION}"
+        IMAGE="${_IMAGE}:${SHORT_SHA}"
+        ENV_VARS="${_ENV_BASE}"
+        SECRETS="${_SECRETS}"
+        SA="${_SA}"
+
+        deploy() {
+          local verb="$1"
+          gcloud run jobs "$$verb" "$${JOB}" \
+            --image="$${IMAGE}" \
+            --region="$${REGION}" \
+            --service-account="$${SA}" \
+            --task-timeout=3600 \
+            --memory=2Gi \
+            --cpu=1 \
+            --max-retries=1 \
+            --set-env-vars="$${ENV_VARS}" \
+            --set-secrets="$${SECRETS}"
+        }
+
+        if gcloud run jobs describe "$${JOB}" --region "$${REGION}" >/dev/null 2>&1; then
+          echo "Actualizando job $${JOB}"
+          deploy update
+        else
+          echo "Creando job $${JOB}"
+          deploy create
+        fi
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -e
+        SCH="${_SCHEDULER}"
+        REGION="${_REGION}"
+        JOB="${_JOB}"
+        SA="${_SA}"
+        URI="https://$${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/worldwide-470917/jobs/$${JOB}:run"
+        if gcloud scheduler jobs describe "$${SCH}" --location="$${REGION}" >/dev/null 2>&1; then
+          echo "Actualizando scheduler $${SCH}"
+          gcloud scheduler jobs update http "$${SCH}" \
+            --location="$${REGION}" \
+            --schedule="0 */4 * * *" \
+            --time-zone="America/Santiago" \
+            --uri="$${URI}" \
+            --http-method=POST \
+            --oauth-service-account-email="$${SA}" \
+            --attempt-deadline=3600s \
+            --description="MariaDB marcas -> BigQuery marcas_mariadb cada 4 h"
+        else
+          echo "Creando scheduler $${SCH}"
+          gcloud scheduler jobs create http "$${SCH}" \
+            --location="$${REGION}" \
+            --schedule="0 */4 * * *" \
+            --time-zone="America/Santiago" \
+            --uri="$${URI}" \
+            --http-method=POST \
+            --oauth-service-account-email="$${SA}" \
+            --attempt-deadline=3600s \
+            --description="MariaDB marcas -> BigQuery marcas_mariadb cada 4 h"
+        fi
+    waitFor: ['deploy-job']
+
+images:
+  - '${_IMAGE}:${SHORT_SHA}'
+  - '${_IMAGE}:latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  substitutionOption: ALLOW_LOOSE
+
+timeout: '1800s'

@@ -1,0 +1,6 @@
+-- La lógica de cruce por sesión quedó en la vista:
+--   worldwide-470917.cr_vistas_reporte.vw_validacion_asist_vs_marcas_60d
+-- Fuente: carga_marcas_mariadb/sql/vw_validacion_asist_vs_marcas_60d.sql
+--
+-- Desplegar:
+--   bq query --use_legacy_sql=false < carga_marcas_mariadb/sql/vw_validacion_asist_vs_marcas_60d.sql

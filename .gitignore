@@ -1,0 +1,11 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.log
+.DS_Store
+.secret_*
+validacion/*.csv
+validacion/*.xlsx

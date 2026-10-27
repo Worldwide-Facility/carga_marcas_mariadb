@@ -346,6 +346,24 @@ final AS (
       WHERE table_id = 'cr_asistencia_semanal'
     ) AS hora_actual_tabla
   FROM total_sin_nor_duplicado a
+),
+
+jefes_instalacion AS (
+  SELECT
+    UPPER(TRIM(ui.instalacion_rol)) AS instalacion_key,
+    UPPER(COALESCE(NULLIF(TRIM(ui.empresa), ''), 'Security')) AS empresa_key,
+    STRING_AGG(
+      DISTINCT COALESCE(NULLIF(TRIM(p.nombre_completo), ''), LOWER(TRIM(p.email_login))),
+      ', '
+      ORDER BY COALESCE(NULLIF(TRIM(p.nombre_completo), ''), LOWER(TRIM(p.email_login))) ASC
+    ) AS jefes_instalacion
+  FROM `worldwide-470917.app_clientes.usuario_instalaciones` ui
+  INNER JOIN `worldwide-470917.app_clientes.v_permisos_usuarios` p
+    ON LOWER(TRIM(ui.email_login)) = LOWER(TRIM(p.email_login))
+  WHERE ui.puede_ver = TRUE
+    AND p.usuario_activo = TRUE
+    AND p.rol_id = 'JEFE_WFSA'
+  GROUP BY instalacion_key, empresa_key
 )
 
 SELECT
@@ -395,8 +413,12 @@ SELECT
   EXTRACT(MONTH FROM a.dia) AS mes,
   EXTRACT(YEAR FROM a.dia) AS ano,
   a.hrtotrol AS horas_planificadas,
-  a.valortvf * a.asistencia_final_calc AS valortvf
+  a.valortvf * a.asistencia_final_calc AS valortvf,
+  j.jefes_instalacion
 FROM final a
+LEFT JOIN jefes_instalacion j
+  ON UPPER(TRIM(a.instalacion_rol)) = j.instalacion_key
+ AND UPPER(TRIM(a.empresa)) = j.empresa_key
 WHERE a.dia >= DATE_ADD(CURRENT_DATE('America/Santiago'), INTERVAL -180 DAY)
   AND a.rn_shift = 1
 ;

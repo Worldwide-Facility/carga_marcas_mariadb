@@ -12,10 +12,24 @@ import subprocess
 import google.auth
 import google.auth.exceptions
 import google.auth.transport.requests
+import pymysql
 import requests
 
 import config
-from extract import get_connection
+
+
+def get_connection() -> pymysql.connections.Connection:
+    return pymysql.connect(
+        host=config.MARIADB_HOST,
+        port=config.MARIADB_PORT,
+        user=config.MARIADB_USER,
+        password=config.MARIADB_PASSWORD,
+        database=config.MARIADB_DATABASE,
+        charset="utf8mb4",
+        connect_timeout=30,
+        read_timeout=600,
+        write_timeout=600,
+    )
 
 _SECRET_USER = "carga-marcas-mariadb-user"
 _SECRET_PASSWORD = "carga-marcas-mariadb-password"

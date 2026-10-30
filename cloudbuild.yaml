@@ -1,14 +1,17 @@
 # Push a main → imagen + Cloud Run Job + Cloud Scheduler cada 4 h.
-# Secretos MARIADB_USER / MARIADB_PASSWORD se adjuntan al job; no van en este YAML.
+# El secreto FRAX_API_KEY se adjunta al job; no va en este YAML.
 
 substitutions:
-  _REGION: us-east1
+  _REGION: southamerica-west1
+  _SCHEDULER_REGION: us-east1
   _JOB: carga-marcas-mariadb
   _SCHEDULER: carga-marcas-mariadb-schedule
+  _JOB_PERSONAS: carga-personas-frax
+  _SCHEDULER_PERSONAS: carga-personas-frax-schedule
   _SA: cargar-cr@worldwide-470917.iam.gserviceaccount.com
   _IMAGE: gcr.io/worldwide-470917/carga-marcas-mariadb
-  _ENV_BASE: 'GCP_PROJECT_ID=worldwide-470917,BQ_DATASET=cr_reportes,BQ_TABLE=marcas_mariadb,BQ_WRITE_DISPOSITION=WRITE_TRUNCATE,MARIADB_HOST=201.236.154.66,MARIADB_PORT=65500,MARIADB_DATABASE=worldwide,MARIADB_TABLE=marcas'
-  _SECRETS: 'MARIADB_USER=carga-marcas-mariadb-user:latest,MARIADB_PASSWORD=carga-marcas-mariadb-password:latest'
+  _ENV_BASE: 'GCP_PROJECT_ID=worldwide-470917,BQ_DATASET=cr_reportes,BQ_TABLE=marcas_mariadb,BQ_TABLE_PERSONAS=personas_frax,BQ_WRITE_DISPOSITION=WRITE_TRUNCATE,FRAX_API_BASE=https://frax.controltienda.com/api/v1,FRAX_API_BASE_FALLBACK=https://frax2.controltienda.com/api/v1,FRAX_DESDE=2024-08-01'
+  _SECRETS: 'FRAX_API_KEY=carga-marcas-frax-api-key:latest'
 
 steps:
   - name: 'gcr.io/cloud-builders/docker'
@@ -34,8 +37,7 @@ steps:
     args:
       - -c
       - |
-        set -e
-        JOB="${_JOB}"
+        set -euo pipefail
         REGION="${_REGION}"
         IMAGE="${_IMAGE}:$BUILD_ID"
         ENV_VARS="${_ENV_BASE}"
@@ -43,61 +45,63 @@ steps:
         SA="${_SA}"
 
         deploy() {
-          local verb="$1"
-          gcloud run jobs "$$verb" "$${JOB}" \
-            --image="$${IMAGE}" \
-            --region="$${REGION}" \
-            --service-account="$${SA}" \
+          local name="$$1"
+          local args="$$2"
+          local verb="update"
+          if ! gcloud run jobs describe "$$name" --region "$$REGION" >/dev/null 2>&1; then
+            verb="create"
+          fi
+          echo "$$verb job $$name"
+          gcloud run jobs "$$verb" "$$name" \
+            --image="$$IMAGE" \
+            --region="$$REGION" \
+            --service-account="$$SA" \
             --task-timeout=3600 \
             --memory=2Gi \
             --cpu=1 \
             --max-retries=1 \
-            --set-env-vars="$${ENV_VARS}" \
-            --set-secrets="$${SECRETS}"
+            --args="$$args" \
+            --set-env-vars="$$ENV_VARS" \
+            --set-secrets="$$SECRETS"
         }
 
-        if gcloud run jobs describe "$${JOB}" --region "$${REGION}" >/dev/null 2>&1; then
-          echo "Actualizando job $${JOB}"
-          deploy update
-        else
-          echo "Creando job $${JOB}"
-          deploy create
-        fi
+        deploy "${_JOB}" "python,main.py,sync"
+        deploy "${_JOB_PERSONAS}" "python,main.py,sync-personas"
 
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: bash
     args:
       - -c
       - |
-        set -e
-        SCH="${_SCHEDULER}"
+        set -euo pipefail
         REGION="${_REGION}"
-        JOB="${_JOB}"
+        SCHEDULER_REGION="${_SCHEDULER_REGION}"
         SA="${_SA}"
-        URI="https://$${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/worldwide-470917/jobs/$${JOB}:run"
-        if gcloud scheduler jobs describe "$${SCH}" --location="$${REGION}" >/dev/null 2>&1; then
-          echo "Actualizando scheduler $${SCH}"
-          gcloud scheduler jobs update http "$${SCH}" \
-            --location="$${REGION}" \
-            --schedule="0 */4 * * *" \
+
+        upsert_scheduler() {
+          local sch="$$1"
+          local job="$$2"
+          local schedule="$$3"
+          local description="$$4"
+          local uri="https://$${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/worldwide-470917/jobs/$${job}:run"
+          local verb="update"
+          if ! gcloud scheduler jobs describe "$$sch" --location="$$SCHEDULER_REGION" >/dev/null 2>&1; then
+            verb="create"
+          fi
+          echo "$$verb scheduler $$sch"
+          gcloud scheduler jobs "$$verb" http "$$sch" \
+            --location="$$SCHEDULER_REGION" \
+            --schedule="$$schedule" \
             --time-zone="America/Santiago" \
-            --uri="$${URI}" \
+            --uri="$$uri" \
             --http-method=POST \
-            --oauth-service-account-email="$${SA}" \
+            --oauth-service-account-email="$$SA" \
             --attempt-deadline=1800s \
-            --description="MariaDB marcas -> BigQuery marcas_mariadb cada 4 h"
-        else
-          echo "Creando scheduler $${SCH}"
-          gcloud scheduler jobs create http "$${SCH}" \
-            --location="$${REGION}" \
-            --schedule="0 */4 * * *" \
-            --time-zone="America/Santiago" \
-            --uri="$${URI}" \
-            --http-method=POST \
-            --oauth-service-account-email="$${SA}" \
-            --attempt-deadline=1800s \
-            --description="MariaDB marcas -> BigQuery marcas_mariadb cada 4 h"
-        fi
+            --description="$$description"
+        }
+
+        upsert_scheduler "${_SCHEDULER}" "${_JOB}" "0 */4 * * *" "API FRAX marcas -> BigQuery marcas_mariadb cada 4 h"
+        upsert_scheduler "${_SCHEDULER_PERSONAS}" "${_JOB_PERSONAS}" "0 8 * * *" "API FRAX personas -> BigQuery personas_frax todos los dias a las 8:00"
     waitFor: ['deploy-job']
 
 images:

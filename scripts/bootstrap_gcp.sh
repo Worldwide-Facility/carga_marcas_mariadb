@@ -9,7 +9,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 if [[ ! -f .env ]]; then
-  echo "Falta .env con MARIADB_USER y MARIADB_PASSWORD" >&2
+  echo "Falta .env con FRAX_API_KEY" >&2
   exit 1
 fi
 
@@ -17,12 +17,10 @@ python - <<'PY'
 from pathlib import Path
 from dotenv import dotenv_values
 v = dotenv_values(".env")
-user = (v.get("MARIADB_USER") or "").strip()
-password = v.get("MARIADB_PASSWORD") or ""
-if not user or not password:
-    raise SystemExit("MARIADB_USER / MARIADB_PASSWORD vacíos en .env")
-Path(".secret_user").write_text(user, encoding="utf-8")
-Path(".secret_pass").write_text(password, encoding="utf-8")
+key = (v.get("FRAX_API_KEY") or "").strip()
+if not key.startswith("frx_"):
+    raise SystemExit("FRAX_API_KEY vacío o inválido en .env (debe empezar con frx_)")
+Path(".secret_frax_key").write_text(key, encoding="utf-8")
 PY
 
 ensure_secret() {
@@ -42,9 +40,8 @@ ensure_secret() {
     --quiet >/dev/null
 }
 
-ensure_secret "carga-marcas-mariadb-user" ".secret_user"
-ensure_secret "carga-marcas-mariadb-password" ".secret_pass"
-rm -f .secret_user .secret_pass
+ensure_secret "carga-marcas-frax-api-key" ".secret_frax_key"
+rm -f .secret_frax_key
 
 if gcloud builds triggers describe carga-marcas-mariadb --region "$REGION" --project "$PROJECT_ID" >/dev/null 2>&1; then
   echo "Trigger Cloud Build ya existe"
@@ -57,7 +54,7 @@ else
     --build-config=cloudbuild.yaml \
     --region="$REGION" \
     --project="$PROJECT_ID" \
-    --description="MariaDB marcas -> BigQuery cada push a main"
+    --description="API FRAX marcas -> BigQuery cada push a main"
 fi
 
 echo "Listo. Siguiente: gcloud builds submit --config cloudbuild.yaml"

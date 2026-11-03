@@ -223,7 +223,9 @@ jefes_instalacion as (
   group by instalacion_key, empresa_key
 )
 
-select o.*, j.jefes_instalacion
+select o.* REPLACE (
+  `worldwide-470917.cr_vistas_reporte.instalacion_reporte`(o.instalacion_rol) AS instalacion_rol
+), j.jefes_instalacion
 from output o
 left join jefes_instalacion j
   on UPPER(TRIM(o.instalacion_rol)) = j.instalacion_key

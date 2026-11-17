@@ -224,7 +224,8 @@ jefes_instalacion as (
 )
 
 select o.* REPLACE (
-  `worldwide-470917.cr_vistas_reporte.instalacion_reporte`(o.instalacion_rol) AS instalacion_rol
+  `worldwide-470917.cr_vistas_reporte.instalacion_reporte_emp`(o.empresa, o.instalacion_rol) AS instalacion_rol,
+  `worldwide-470917.cr_vistas_reporte.cliente_reporte`(o.empresa, o.instalacion_rol, o.cliente_rol) AS cliente_rol
 ), j.jefes_instalacion
 from output o
 left join jefes_instalacion j

@@ -367,8 +367,8 @@ jefes_instalacion AS (
 )
 
 SELECT
-  a.cliente_rol,
-  `worldwide-470917.cr_vistas_reporte.instalacion_reporte`(a.instalacion_rol) AS instalacion_rol,
+  `worldwide-470917.cr_vistas_reporte.cliente_reporte`(a.empresa, a.instalacion_rol, a.cliente_rol) AS cliente_rol,
+  `worldwide-470917.cr_vistas_reporte.instalacion_reporte_emp`(a.empresa, a.instalacion_rol) AS instalacion_rol,
   a.nombrerol,
   a.rutrol,
   a.cargo,

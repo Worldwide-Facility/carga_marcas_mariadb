@@ -6,12 +6,17 @@ import unittest
 from datetime import date, datetime, time
 
 from faceid_marcacion_rules import (
+    CargoAsignacion,
     FilaMarca,
+    TurnoClave,
+    agregar_nombres_cargo,
     combinar_hist_y_24,
+    contar_filas_vs_turnos_unicos,
     deducir_marca,
     deducir_marcas,
     elegir_marca_lado,
     en_ventana,
+    enriquecer_turno_cargos,
     estado_faceid,
     fin_turno,
     inicio_turno,
@@ -339,6 +344,90 @@ class Complemento24Test(unittest.TestCase):
         ]
         self.assertIsNone(elegir_marca_lado(sal_cands, fin))
         self.assertFalse(any(m.fecha == date(2026, 11, 18) and m.tipo == "Salida Laboral" for m in marcas))
+
+
+class CargosJoinUnicidadTest(unittest.TestCase):
+    """
+    Espejo del CTE output: joins de Subgerente / Jefe Operaciones / Supervisor.
+    El bug histórico usaba a.empresa = b.empresa al joinear c/d y multiplicaba filas.
+    """
+
+    def setUp(self) -> None:
+        self.turno = TurnoClave(
+            rutasi="11111111",
+            her=datetime(2026, 11, 17, 20, 0),
+            instalacion_rol="INACAP COPIAPO",
+            empresa="Security",
+        )
+        # 1 Subgerente Security + 2 jefes (2 empresas) + 4 supervisores (4 empresas)
+        # → bug sin filtrar empresa de c/d: 2×4 = 8 filas; fix: 1 fila (solo Security).
+        # Dos supervisores Security para probar STRING_AGG DISTINCT.
+        self.asignaciones = [
+            CargoAsignacion("Sub A", "Subgerente", "INACAP COPIAPO", "Security"),
+            CargoAsignacion("Jefe Sec", "Jefe Operaciones", "INACAP COPIAPO", "Security"),
+            CargoAsignacion("Jefe Otra", "Jefe Operaciones", "INACAP COPIAPO", "Otra"),
+            CargoAsignacion("Sup 1", "Supervisor", "INACAP COPIAPO", "Security"),
+            CargoAsignacion("Sup 2", "Supervisor", "INACAP COPIAPO", "Security"),
+            CargoAsignacion("Sup 3", "Supervisor", "INACAP COPIAPO", "Emp3"),
+            CargoAsignacion("Sup 4", "Supervisor", "INACAP COPIAPO", "Emp4"),
+            CargoAsignacion("Sup 5", "Supervisor", "INACAP COPIAPO", "Emp5"),
+        ]
+
+    def test_bug_join_via_subgerente_multiplica_8x(self) -> None:
+        filas = enriquecer_turno_cargos(
+            self.turno,
+            self.asignaciones,
+            join_jefe_supervisor_via_subgerente_empresa=True,
+        )
+        # 2 jefes (empresas distintas) × 4 grupos supervisor (Security/Emp3/Emp4/Emp5)
+        self.assertEqual(len(filas), 8)
+
+    def test_fix_una_fila_por_turno_agrega_nombres(self) -> None:
+        filas = enriquecer_turno_cargos(self.turno, self.asignaciones)
+        self.assertEqual(len(filas), 1)
+        f = filas[0]
+        self.assertEqual(f["subgerente"], "Sub A")
+        self.assertEqual(f["jefe_zonal"], "Jefe Sec")
+        # Varios supervisores Security → STRING_AGG DISTINCT ordenado
+        self.assertEqual(f["supervisor"], "Sup 1, Sup 2")
+
+    def test_sin_subgerente_igual_resuelve_jefe_y_supervisor(self) -> None:
+        asign = [a for a in self.asignaciones if a.cargo != "Subgerente"]
+        filas = enriquecer_turno_cargos(self.turno, asign)
+        self.assertEqual(len(filas), 1)
+        self.assertIsNone(filas[0]["subgerente"])
+        self.assertEqual(filas[0]["jefe_zonal"], "Jefe Sec")
+        self.assertEqual(filas[0]["supervisor"], "Sup 1, Sup 2")
+
+    def test_agregar_nombres_distinct_ordenado(self) -> None:
+        self.assertEqual(agregar_nombres_cargo(["Zoe", "Ana", "Ana", ""]), "Ana, Zoe")
+        self.assertIsNone(agregar_nombres_cargo(["", None]))  # type: ignore[list-item]
+
+    def test_contar_filas_vs_turnos_detecta_duplicados(self) -> None:
+        # 4 personas N2 × 8 filas bug = 32; 4 turnos únicos.
+        turnos = [
+            TurnoClave(f"rut{i}", datetime(2026, 11, 17, 20, 0), "INACAP COPIAPO", "Security")
+            for i in range(4)
+        ]
+        filas_bug: list[TurnoClave] = []
+        for t in turnos:
+            enriquecidas = enriquecer_turno_cargos(
+                t,
+                self.asignaciones,
+                join_jefe_supervisor_via_subgerente_empresa=True,
+            )
+            filas_bug.extend([e["turno"] for e in enriquecidas])
+        n_filas, n_unicos = contar_filas_vs_turnos_unicos(filas_bug)
+        self.assertEqual(n_filas, 32)
+        self.assertEqual(n_unicos, 4)
+
+        filas_ok: list[TurnoClave] = []
+        for t in turnos:
+            enriquecidas = enriquecer_turno_cargos(t, self.asignaciones)
+            filas_ok.extend([e["turno"] for e in enriquecidas])
+        n_filas_ok, n_unicos_ok = contar_filas_vs_turnos_unicos(filas_ok)
+        self.assertEqual(n_filas_ok, n_unicos_ok)
+        self.assertEqual(n_filas_ok, 4)
 
 
 if __name__ == "__main__":

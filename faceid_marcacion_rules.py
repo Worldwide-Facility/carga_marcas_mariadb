@@ -182,3 +182,134 @@ def estado_faceid(
     if not tiene_entrada and tiene_salida:
         return "Marca salida"
     return "No Marca"
+
+
+# --- Cargos / enriquecimiento (espejo del CTE output; no toca marcas) ---
+
+CARGO_SUBGERENTE = "Subgerente"
+CARGO_JEFE_ZONAL = "Jefe Operaciones"
+CARGO_SUPERVISOR = "Supervisor"
+
+
+@dataclass(frozen=True)
+class CargoAsignacion:
+    """Fila del CTE `cargos`: persona con cargo en una instalación/empresa."""
+
+    nombre_completo: str
+    cargo: str
+    instalacion_rol: str
+    empresa: str
+
+
+@dataclass(frozen=True)
+class TurnoClave:
+    """Clave de unicidad de un turno en el reporte FaceID."""
+
+    rutasi: str
+    her: datetime
+    instalacion_rol: str
+    empresa: str
+
+
+def agregar_nombres_cargo(nombres: Iterable[str]) -> str | None:
+    """
+    Espejo de STRING_AGG(DISTINCT nombre, ', ' ORDER BY nombre) en el CTE cargos.
+    Varias personas del mismo cargo → una sola celda; sin nombres → None.
+    """
+    unicos = sorted({(n or "").strip() for n in nombres if (n or "").strip()})
+    if not unicos:
+        return None
+    return ", ".join(unicos)
+
+
+def _indice_cargos(
+    asignaciones: Sequence[CargoAsignacion],
+) -> dict[tuple[str, str, str], str | None]:
+    """(instalacion, empresa, cargo) → nombres agregados."""
+    buckets: dict[tuple[str, str, str], list[str]] = {}
+    for a in asignaciones:
+        if not a.instalacion_rol:
+            continue
+        key = (a.instalacion_rol, a.empresa, a.cargo)
+        buckets.setdefault(key, []).append(a.nombre_completo)
+    return {k: agregar_nombres_cargo(v) for k, v in buckets.items()}
+
+
+def enriquecer_turno_cargos(
+    turno: TurnoClave,
+    asignaciones: Sequence[CargoAsignacion],
+    *,
+    join_jefe_supervisor_via_subgerente_empresa: bool = False,
+) -> list[dict]:
+    """
+    Espejo del CTE `output`: adjunta subgerente / jefe_zonal / supervisor.
+
+    Por defecto compara empresa del propio cargo (correcto: ≤1 fila por turno).
+    Si `join_jefe_supervisor_via_subgerente_empresa=True` reproduce el bug histórico
+    (`a.empresa = b.empresa` al joinear c/d): producto cartesiano de jefes × supervisores
+    de la instalación sin filtrar por empresa del cargo.
+    """
+    idx = _indice_cargos(asignaciones)
+    inst, emp = turno.instalacion_rol, turno.empresa
+    subgerente = idx.get((inst, emp, CARGO_SUBGERENTE))
+
+    if join_jefe_supervisor_via_subgerente_empresa:
+        # Bug: si hay Subgerente, la condición de empresa queda siempre TRUE y se
+        # cruzan todos los Jefe Operaciones × Supervisor de esa instalación.
+        if subgerente is None:
+            return [
+                {
+                    "turno": turno,
+                    "subgerente": None,
+                    "jefe_zonal": None,
+                    "supervisor": None,
+                }
+            ]
+        jefes = [
+            nombre
+            for (i, _e, cargo), nombre in idx.items()
+            if i == inst and cargo == CARGO_JEFE_ZONAL and nombre is not None
+        ]
+        supers = [
+            nombre
+            for (i, _e, cargo), nombre in idx.items()
+            if i == inst and cargo == CARGO_SUPERVISOR and nombre is not None
+        ]
+        if not jefes and not supers:
+            return [
+                {
+                    "turno": turno,
+                    "subgerente": subgerente,
+                    "jefe_zonal": None,
+                    "supervisor": None,
+                }
+            ]
+        jefes = jefes or [None]
+        supers = supers or [None]
+        return [
+            {
+                "turno": turno,
+                "subgerente": subgerente,
+                "jefe_zonal": j,
+                "supervisor": s,
+            }
+            for j in jefes
+            for s in supers
+        ]
+
+    return [
+        {
+            "turno": turno,
+            "subgerente": subgerente,
+            "jefe_zonal": idx.get((inst, emp, CARGO_JEFE_ZONAL)),
+            "supervisor": idx.get((inst, emp, CARGO_SUPERVISOR)),
+        }
+    ]
+
+
+def contar_filas_vs_turnos_unicos(
+    filas: Sequence[TurnoClave],
+) -> tuple[int, int]:
+    """(n_filas, n_turnos_unicos) por (rutasi, her, instalacion_rol, empresa)."""
+    unicos = {(f.rutasi, f.her, f.instalacion_rol, f.empresa) for f in filas}
+    return len(filas), len(unicos)

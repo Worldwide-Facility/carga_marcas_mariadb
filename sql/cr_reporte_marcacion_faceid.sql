@@ -22,6 +22,12 @@
 --
 -- Costo: marcas prefiltradas por fecha_desde del rol (−1/+1 día) y solo columnas necesarias.
 -- jefes_instalacion: jefes (JEFE_WFSA activos) asignados a la instalación en usuario_instalaciones.
+--
+-- Cargos (subgerente / jefe zonal / supervisor):
+--   * Un join por cargo contra el CTE `cargos`, siempre con instalacion_rol + empresa + cargo.
+--   * Varias personas del mismo cargo en la misma instalación/empresa se agregan con
+--     STRING_AGG(DISTINCT nombre ORDER BY nombre) separado por ', ' (una sola fila).
+--   * jefes_instalacion ya agrega con STRING_AGG DISTINCT; no multiplica filas.
 
 CREATE OR REPLACE VIEW `worldwide-470917.cr_vistas_reporte.cr_reporte_marcacion_faceid` AS
 WITH params AS (
@@ -445,15 +451,17 @@ data_final AS (
     AND a.nombre_asistente NOT IN ('sin cubrir antes', 'sin cubrir despues')
 ),
 
+-- Una fila por (cargo, instalación, empresa). Varios nombres → lista ordenada única.
 cargos AS (
   SELECT
-    STRING_AGG(a.nombre_completo, ',') AS nombre,
+    STRING_AGG(DISTINCT a.nombre_completo, ', ' ORDER BY a.nombre_completo) AS nombre,
     a.cargo,
     b.instalacion_rol,
     b.empresa
   FROM `worldwide-470917.app_clientes.usuario_personas` a
   LEFT JOIN `worldwide-470917.app_clientes.usuario_instalaciones` b
     ON b.email_login = a.email_login
+  WHERE b.instalacion_rol IS NOT NULL
   GROUP BY a.cargo, b.instalacion_rol, b.empresa
 ),
 
@@ -468,13 +476,16 @@ output AS (
     ON a.instalacion_rol = b.instalacion_rol
    AND a.empresa = b.empresa
    AND b.cargo = 'Subgerente'
+  -- IMPORTANTE: comparar c.empresa / d.empresa (no b.empresa). Usar b.empresa aquí
+  -- era TRUE siempre que hubiera Subgerente y multiplicaba filas (producto cartesiano
+  -- de todos los Jefe Operaciones × Supervisor de la instalación, sin filtrar empresa).
   LEFT JOIN cargos c
     ON a.instalacion_rol = c.instalacion_rol
-   AND a.empresa = b.empresa
+   AND a.empresa = c.empresa
    AND c.cargo = 'Jefe Operaciones'
   LEFT JOIN cargos d
     ON a.instalacion_rol = d.instalacion_rol
-   AND a.empresa = b.empresa
+   AND a.empresa = d.empresa
    AND d.cargo = 'Supervisor'
   WHERE UPPER(a.cliente_rol) NOT LIKE '%ADMINISTRA%'
 ),

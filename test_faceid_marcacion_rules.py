@@ -7,16 +7,21 @@ from datetime import date, datetime, time
 
 from faceid_marcacion_rules import (
     CargoAsignacion,
+    EquipoFaceid,
     FilaMarca,
     TurnoClave,
     agregar_nombres_cargo,
+    codigos_equipos_para_marcas,
     combinar_hist_y_24,
     contar_filas_vs_turnos_unicos,
     deducir_marca,
     deducir_marcas,
+    deduplicar_equipos_enriq,
+    elegir_equipo_enriquecimiento,
     elegir_marca_lado,
     en_ventana,
     enriquecer_turno_cargos,
+    enriquecer_turno_por_equipos,
     estado_faceid,
     fin_turno,
     inicio_turno,
@@ -428,6 +433,108 @@ class CargosJoinUnicidadTest(unittest.TestCase):
         n_filas_ok, n_unicos_ok = contar_filas_vs_turnos_unicos(filas_ok)
         self.assertEqual(n_filas_ok, n_unicos_ok)
         self.assertEqual(n_filas_ok, 4)
+
+
+class EquiposEnriqUnicidadTest(unittest.TestCase):
+    """
+    Espejo de equipos vs equipos_enriq / equipos_lw_enriq.
+    Bug: join de turnos por nombre+empresa contra ambas tablas con 2 equipos cada una → ×4.
+    Fix: dedupe enriquecimiento; marcas_raw sigue aceptando todos los cod.
+    """
+
+    def setUp(self) -> None:
+        # INACAP COPIAPO Security: 2657 sin conexión, 2658 con ult_conexion reciente.
+        self.eq_2657 = EquipoFaceid(
+            "INACAP COPIAPO", "Security", 2657, ult_conexion=None
+        )
+        self.eq_2658 = EquipoFaceid(
+            "INACAP COPIAPO",
+            "Security",
+            2658,
+            ult_conexion=datetime(2026, 11, 17, 17, 32),
+        )
+        self.equipos = [self.eq_2657, self.eq_2658]
+        # Misma duplicación en _lw (códigos distintos solo para el espejo).
+        self.equipos_lw = [
+            EquipoFaceid("INACAP COPIAPO", "Security", 2657, ult_conexion=None),
+            EquipoFaceid(
+                "INACAP COPIAPO",
+                "Security",
+                2658,
+                ult_conexion=datetime(2026, 11, 17, 17, 32),
+            ),
+        ]
+        self.turno = TurnoClave(
+            rutasi="11111111",
+            her=datetime(2026, 11, 17, 20, 0),
+            instalacion_rol="INACAP COPIAPO",
+            empresa="Security",
+        )
+
+    def test_elige_ult_conexion_reciente_nulls_last_desempate_cod(self) -> None:
+        elegido = elegir_equipo_enriquecimiento(self.equipos)
+        assert elegido is not None
+        self.assertEqual(elegido.cod, 2658)
+        # Dos con misma ult_conexion → gana el cod menor.
+        empate = [
+            EquipoFaceid("X", "Security", 10, datetime(2026, 11, 17, 12, 0)),
+            EquipoFaceid("X", "Security", 9, datetime(2026, 11, 17, 12, 0)),
+        ]
+        self.assertEqual(elegir_equipo_enriquecimiento(empate).cod, 9)
+
+    def test_bug_eq_x_eq_lw_multiplica_4x(self) -> None:
+        filas = enriquecer_turno_por_equipos(
+            self.turno,
+            self.equipos,
+            self.equipos_lw,
+            dedupe_enriquecimiento=False,
+        )
+        self.assertEqual(len(filas), 4)
+        # 4 personas N2 → 16 filas (caso reportado).
+        turnos = [
+            TurnoClave(f"rut{i}", datetime(2026, 11, 17, 20, 0), "INACAP COPIAPO", "Security")
+            for i in range(4)
+        ]
+        filas_bug: list[TurnoClave] = []
+        for t in turnos:
+            enriquecidas = enriquecer_turno_por_equipos(
+                t, self.equipos, self.equipos_lw, dedupe_enriquecimiento=False
+            )
+            filas_bug.extend([e["turno"] for e in enriquecidas])
+        n_filas, n_unicos = contar_filas_vs_turnos_unicos(filas_bug)
+        self.assertEqual(n_filas, 16)
+        self.assertEqual(n_unicos, 4)
+
+    def test_fix_una_fila_con_ult_conexion_del_equipo_reciente(self) -> None:
+        filas = enriquecer_turno_por_equipos(
+            self.turno, self.equipos, self.equipos_lw
+        )
+        self.assertEqual(len(filas), 1)
+        f = filas[0]
+        self.assertEqual(f["cod_enriq"], 2658)
+        self.assertEqual(f["ult_conexion"], datetime(2026, 11, 17, 17, 32))
+        self.assertTrue(f["instalacion_con_faceid"])
+        self.assertIsNone(f["nuevo_faceid"])  # está en _lw tras dedupe
+
+        dedup = deduplicar_equipos_enriq(self.equipos)
+        self.assertEqual(len(dedup), 1)
+        self.assertEqual(dedup[0].cod, 2658)
+
+    def test_marcas_raw_acepta_todos_los_cod_no_pierde_marcas(self) -> None:
+        # Enriquecimiento deja 1 equipo; marcas_raw debe seguir viendo 2657 y 2658.
+        self.assertEqual(codigos_equipos_para_marcas(self.equipos), {2657, 2658})
+        self.assertEqual(len(deduplicar_equipos_enriq(self.equipos)), 1)
+        # Marca en el dispositivo "viejo" (2657) sigue siendo válida vía todos los cod.
+        marca_en_2657 = fila(
+            fecha=date(2026, 11, 17),
+            hora=time(19, 55),
+            tipo="Entrada Laboral",
+            revision="Correcta",
+        )
+        cods = codigos_equipos_para_marcas(self.equipos)
+        self.assertIn(2657, cods)
+        marcas = deducir_marcas([marca_en_2657])
+        self.assertEqual(len(marcas), 1)
 
 
 if __name__ == "__main__":

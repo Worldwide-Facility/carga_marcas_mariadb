@@ -313,3 +313,110 @@ def contar_filas_vs_turnos_unicos(
     """(n_filas, n_turnos_unicos) por (rutasi, her, instalacion_rol, empresa)."""
     unicos = {(f.rutasi, f.her, f.instalacion_rol, f.empresa) for f in filas}
     return len(filas), len(unicos)
+
+
+# --- Equipos FaceID (espejo de equipos vs equipos_enriq / equipos_lw_enriq) ---
+
+
+@dataclass(frozen=True)
+class EquipoFaceid:
+    """Fila de cr_equipos_faceid o cr_equipos_faceid_lw."""
+
+    nombre: str
+    empresa: str
+    cod: int
+    ult_conexion: datetime | None = None
+
+
+def elegir_equipo_enriquecimiento(
+    equipos: Sequence[EquipoFaceid],
+) -> EquipoFaceid | None:
+    """
+    Espejo de QUALIFY ROW_NUMBER() en equipos_enriq / equipos_lw_enriq:
+    una fila por (nombre, empresa) con ult_conexion más reciente (NULL al final)
+    y desempate determinista por cod ASC.
+    """
+    if not equipos:
+        return None
+    # Misma clave: el caller debe pasar solo equipos del mismo (nombre, empresa).
+    nombres = {(e.nombre, e.empresa) for e in equipos}
+    if len(nombres) != 1:
+        raise ValueError("todos los equipos deben compartir (nombre, empresa)")
+    return min(
+        equipos,
+        key=lambda e: (
+            e.ult_conexion is None,  # NULLS LAST
+            -(e.ult_conexion.timestamp()) if e.ult_conexion is not None else 0.0,
+            e.cod,
+        ),
+    )
+
+
+def deduplicar_equipos_enriq(
+    equipos: Sequence[EquipoFaceid],
+) -> list[EquipoFaceid]:
+    """Una fila por (nombre, empresa) con el criterio de elegir_equipo_enriquecimiento."""
+    buckets: dict[tuple[str, str], list[EquipoFaceid]] = {}
+    for e in equipos:
+        buckets.setdefault((e.nombre, e.empresa), []).append(e)
+    out: list[EquipoFaceid] = []
+    for group in buckets.values():
+        elegido = elegir_equipo_enriquecimiento(group)
+        if elegido is not None:
+            out.append(elegido)
+    return out
+
+
+def codigos_equipos_para_marcas(equipos: Sequence[EquipoFaceid]) -> set[int]:
+    """
+    Espejo del CTE `equipos` en marcas_raw: TODOS los cod (sin deduplicar).
+    Las marcas pueden venir de cualquier dispositivo del mismo nombre.
+    """
+    return {e.cod for e in equipos}
+
+
+def enriquecer_turno_por_equipos(
+    turno: TurnoClave,
+    equipos: Sequence[EquipoFaceid],
+    equipos_lw: Sequence[EquipoFaceid] | None = None,
+    *,
+    dedupe_enriquecimiento: bool = True,
+) -> list[dict]:
+    """
+    Espejo del join en `turnos` por nombre+empresa (ult_conexion / faceid / nuevo_faceid).
+
+    Con dedupe_enriquecimiento=True (fix): ≤1 fila por turno.
+    Con False: reproduce el bug (producto cartesiano eq × eq_lw por nombre+empresa).
+    """
+    nombre = turno.instalacion_rol
+    emp = turno.empresa
+    eq_match = [e for e in equipos if e.nombre == nombre and e.empresa == emp]
+    lw_src = equipos_lw if equipos_lw is not None else []
+    lw_match = [e for e in lw_src if e.nombre == nombre and e.empresa == emp]
+
+    if dedupe_enriquecimiento:
+        eq_rows = deduplicar_equipos_enriq(eq_match) or [None]
+        lw_rows = deduplicar_equipos_enriq(lw_match) or [None]
+    else:
+        eq_rows = eq_match or [None]
+        lw_rows = lw_match or [None]
+
+    filas: list[dict] = []
+    for eq in eq_rows:
+        for lw in lw_rows:
+            instalacion_con_faceid = eq is not None
+            nuevo_faceid = (
+                turno.instalacion_rol
+                if lw is None and eq is not None
+                else None
+            )
+            filas.append(
+                {
+                    "turno": turno,
+                    "ult_conexion": eq.ult_conexion if eq is not None else None,
+                    "cod_enriq": eq.cod if eq is not None else None,
+                    "instalacion_con_faceid": instalacion_con_faceid,
+                    "nuevo_faceid": nuevo_faceid,
+                }
+            )
+    return filas

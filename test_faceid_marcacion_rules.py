@@ -7,6 +7,7 @@ from datetime import date, datetime, time
 
 from faceid_marcacion_rules import (
     FilaMarca,
+    combinar_hist_y_24,
     deducir_marca,
     deducir_marcas,
     elegir_marca_lado,
@@ -249,6 +250,95 @@ class CercaniaTest(unittest.TestCase):
         elegida = elegir_marca_lado(candidatas, inicio)
         assert elegida is not None
         self.assertEqual(elegida.hora, time(19, 50))
+
+
+class Complemento24Test(unittest.TestCase):
+    """Hist diario (~08:00 hasta ayer) + _24 en vivo; hist precede al cargar el día."""
+
+    def test_nocturno_salida_solo_en_24_dia_ausente_hist_pobla_salida(self) -> None:
+        # N2 17/11 20:00 -> 18/11 08:00. Hist cargó hasta 17/11; salida de hoy solo en _24.
+        dia = date(2026, 11, 17)
+        her, hsr = time(20, 0), time(8, 0)
+        inicio = inicio_turno(dia, her)
+        fin = fin_turno(dia, her, hsr)
+
+        hist = [
+            fila(
+                fecha=date(2026, 11, 17),
+                hora=time(19, 55),
+                tipo="Entrada Laboral",
+                revision="Correcta",
+            ),
+        ]
+        live_24 = [
+            fila(
+                fecha=date(2026, 11, 18),
+                hora=time(8, 2),
+                tipo="Salida Laboral",
+                revision="Correcta",
+            ),
+        ]
+        marcas = deducir_marcas(combinar_hist_y_24(hist, live_24))
+        sal_cands = [
+            m
+            for m in marcas
+            if m.tipo == "Salida Laboral" and en_ventana(m.marca_ts, fin)
+        ]
+        salida = elegir_marca_lado(sal_cands, fin)
+        self.assertIsNotNone(salida)
+        self.assertEqual(salida.hora, time(8, 2))
+        ent_cands = [
+            m
+            for m in marcas
+            if m.tipo == "Entrada Laboral" and en_ventana(m.marca_ts, inicio)
+        ]
+        entrada = elegir_marca_lado(ent_cands, inicio)
+        self.assertIsNotNone(entrada)
+        self.assertEqual(
+            estado_faceid(True, entrada is not None, salida is not None),
+            "OK",
+        )
+
+    def test_dia_presente_en_hist_ignora_24(self) -> None:
+        # Mismo turno; el hist ya incluye el 18/11 (aunque sin esa salida) → _24 no aporta.
+        dia = date(2026, 11, 17)
+        her, hsr = time(20, 0), time(8, 0)
+        fin = fin_turno(dia, her, hsr)
+
+        hist = [
+            fila(
+                fecha=date(2026, 11, 17),
+                hora=time(19, 55),
+                tipo="Entrada Laboral",
+                revision="Correcta",
+            ),
+            # Día de la salida ya presente en hist (otra marca / otro rut basta para MAX(fecha)).
+            fila(
+                rut="99999999",
+                fecha=date(2026, 11, 18),
+                hora=time(7, 0),
+                tipo="Entrada Laboral",
+                revision="Correcta",
+            ),
+        ]
+        live_24 = [
+            fila(
+                fecha=date(2026, 11, 18),
+                hora=time(8, 2),
+                tipo="Salida Laboral",
+                revision="Correcta",
+            ),
+        ]
+        marcas = deducir_marcas(combinar_hist_y_24(hist, live_24))
+        sal_cands = [
+            m
+            for m in marcas
+            if m.tipo == "Salida Laboral"
+            and m.rut == "21253355"
+            and en_ventana(m.marca_ts, fin)
+        ]
+        self.assertIsNone(elegir_marca_lado(sal_cands, fin))
+        self.assertFalse(any(m.fecha == date(2026, 11, 18) and m.tipo == "Salida Laboral" for m in marcas))
 
 
 if __name__ == "__main__":

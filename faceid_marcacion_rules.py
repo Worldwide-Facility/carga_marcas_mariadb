@@ -23,7 +23,7 @@ TIPO_SALIDA = "Salida Laboral"
 
 @dataclass(frozen=True)
 class FilaMarca:
-    """Una fila del hist (puede haber varias por el mismo marcaje físico)."""
+    """Una fila de hist o _24 (puede haber varias por el mismo marcaje físico)."""
 
     empresa: str
     rut: str
@@ -40,6 +40,24 @@ class FilaMarca:
     @property
     def clave(self) -> tuple:
         return (self.empresa, self.rut, self.fecha, self.hora, self.tipo)
+
+
+def combinar_hist_y_24(
+    hist: Sequence[FilaMarca],
+    live_24: Sequence[FilaMarca],
+) -> list[FilaMarca]:
+    """
+    Espejo del UNION ALL en marcas_raw: todo el hist más filas de _24 con
+    fecha > MAX(fecha) del hist (hist tiene precedencia al cargar un día).
+    """
+    out = list(hist)
+    if not hist:
+        return out
+    max_fecha_hist = max(f.fecha for f in hist)
+    for f in live_24:
+        if f.fecha > max_fecha_hist:
+            out.append(f)
+    return out
 
 
 @dataclass(frozen=True)

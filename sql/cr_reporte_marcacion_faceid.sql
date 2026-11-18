@@ -28,12 +28,21 @@
 --   * Varias personas del mismo cargo en la misma instalación/empresa se agregan con
 --     STRING_AGG(DISTINCT nombre ORDER BY nombre) separado por ', ' (una sola fila).
 --   * jefes_instalacion ya agrega con STRING_AGG DISTINCT; no multiplica filas.
+--
+-- Equipos FaceID:
+--   * `equipos` = todos los códigos (para marcas_raw por cod_dispositivo). No deduplicar:
+--     si hay dos equipos con el mismo nombre (p. ej. 2657 y 2658), las marcas pueden
+--     venir de cualquiera y deben seguir entrando.
+--   * `equipos_enriq` / `equipos_lw_enriq` = una fila por (nombre, empresa) para el join
+--     de turnos (ult_conexion, instalacion_con_faceid, nuevo_faceid). Criterio:
+--     ult_conexion más reciente (NULL al final), desempate por cod ASC.
 
 CREATE OR REPLACE VIEW `worldwide-470917.cr_vistas_reporte.cr_reporte_marcacion_faceid` AS
 WITH params AS (
   SELECT DATE('2025-10-01') AS fecha_desde
 ),
 
+-- Todos los códigos: solo para INNER JOIN de marcas por cod_dispositivo.
 equipos AS (
   SELECT
     eq.nombre,
@@ -41,6 +50,32 @@ equipos AS (
     eq.empresa,
     eq.cod
   FROM `worldwide-470917.cr_reportes.cr_equipos_faceid` eq
+),
+
+-- Una fila por (nombre, empresa) para enriquecer turnos. No usar en marcas_raw.
+equipos_enriq AS (
+  SELECT
+    nombre,
+    ult_conexion,
+    empresa,
+    cod
+  FROM equipos
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY nombre, empresa
+    ORDER BY ult_conexion DESC NULLS LAST, cod ASC
+  ) = 1
+),
+
+-- Misma deduplicación en _lw (join solo por nombre+empresa en turnos).
+equipos_lw_enriq AS (
+  SELECT
+    nombre,
+    empresa
+  FROM `worldwide-470917.cr_reportes.cr_equipos_faceid_lw`
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY nombre, empresa
+    ORDER BY ult_conexion DESC NULLS LAST, cod ASC
+  ) = 1
 ),
 
 -- Solo columnas necesarias; rango de fechas del rol ±1 día (entrada temprana / salida nocturna).
@@ -188,10 +223,11 @@ turnos AS (
     ) AS fin_turno
   FROM pre_int hist
   CROSS JOIN params p
-  LEFT JOIN equipos eq
+  -- Enriquecimiento: una sola fila por (nombre, empresa). Marcas siguen usando `equipos` (todos los cod).
+  LEFT JOIN equipos_enriq eq
     ON hist.equip_faceid = eq.nombre
    AND hist.empresa = eq.empresa
-  LEFT JOIN `worldwide-470917.cr_reportes.cr_equipos_faceid_lw` eq_lw
+  LEFT JOIN equipos_lw_enriq eq_lw
     ON hist.equip_faceid = eq_lw.nombre
    AND hist.empresa = eq_lw.empresa
   WHERE DATE(hist.dia) >= p.fecha_desde

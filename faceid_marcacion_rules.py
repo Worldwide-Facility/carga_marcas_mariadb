@@ -184,6 +184,132 @@ def estado_faceid(
     return "No Marca"
 
 
+# --- Universo de turnos (espejo de pre_int / turnos desde cr_asistencia_hist_tb) ---
+
+RUTS_GENERICOS = frozenset({"90000001", "90000002", "90000009"})
+
+
+def _rut_digitos(value: object | None) -> str:
+    return "".join(ch for ch in str(value or "") if ch.isdigit())
+
+
+def es_rut_generico(rutasi: object | None) -> bool:
+    """True si rutasi es hueco ControlRoll (excluido del universo FaceID)."""
+    return _rut_digitos(rutasi) in RUTS_GENERICOS
+
+
+def en_universo_faceid(rutasi: object | None) -> bool:
+    """Espejo del filtro de turnos: rutasi no vacío y no genérico."""
+    digits = _rut_digitos(rutasi)
+    return bool(digits) and digits not in RUTS_GENERICOS
+
+
+def nombre_asistente_desde_hist(
+    rutrol: object | None,
+    rutasi: object | None,
+    nombrerol: str | None,
+    relevo: str | None,
+) -> str | None:
+    """
+    Espejo de nombre_asistente en pre_int:
+    - mismo rutrol/rutasi → nombrerol
+    - si no, nombre del tramo de relevo cuyo RUT coincide con rutasi
+      (tramos separados por ' || '; cada tramo 'RUT | horario | NOMBRE')
+    - fallback: nombrerol
+    """
+    if _rut_digitos(rutrol) == _rut_digitos(rutasi) and _rut_digitos(rutasi):
+        return (nombrerol or "").strip() or None
+
+    rutasi_n = _rut_digitos(rutasi)
+    for seg in (relevo or "").split(" || "):
+        parts = [p.strip() for p in seg.split(" | ")]
+        if not parts:
+            continue
+        if _rut_digitos(parts[0]) == rutasi_n and rutasi_n:
+            nombre = parts[-1].strip() if parts else ""
+            return nombre or None
+    return (nombrerol or "").strip() or None
+
+
+@dataclass(frozen=True)
+class FilaTurnoHist:
+    """Fila mínima de cr_asistencia_hist_tb para unicidad / nombre FaceID."""
+
+    rutasi: str
+    her: datetime
+    hsr: datetime
+    instalacion_rol: str
+    empresa: str
+    tipo: str
+    rutrol: str
+    turno: str = ""
+    dia: date | None = None
+    nombrerol: str | None = None
+    relevo: str | None = None
+
+    @property
+    def clave_unicidad(self) -> tuple:
+        return (str(self.rutasi), self.her, self.instalacion_rol, self.empresa)
+
+    @property
+    def nombre_asistente(self) -> str | None:
+        return nombre_asistente_desde_hist(
+            self.rutrol, self.rutasi, self.nombrerol, self.relevo
+        )
+
+
+def _prioridad_tipo_turno(tipo: str | None) -> int:
+    t = (tipo or "").strip().upper()
+    if t in ("TIT", "EXR"):
+        return 0
+    if t == "NOR":
+        return 1
+    return 2
+
+
+def elegir_turno_unicidad(filas: Sequence[FilaTurnoHist]) -> FilaTurnoHist | None:
+    """
+    Espejo del QUALIFY en pre_int: una fila por (rutasi, her, instalacion_rol, empresa).
+    Prefiere TIT/EXR sobre NOR, luego hsr más tardío; desempate rutrol, turno, dia.
+    """
+    if not filas:
+        return None
+    claves = {f.clave_unicidad for f in filas}
+    if len(claves) != 1:
+        raise ValueError("todas las filas deben compartir la clave de unicidad FaceID")
+    return min(
+        filas,
+        key=lambda f: (
+            _prioridad_tipo_turno(f.tipo),
+            # hsr más tardío → ordenar por −timestamp; None al final
+            f.hsr is None,
+            -(f.hsr.timestamp()) if f.hsr is not None else 0.0,
+            str(f.rutrol),
+            f.turno or "",
+            str(f.dia or ""),
+        ),
+    )
+
+
+def deduplicar_turnos_faceid(
+    filas: Sequence[FilaTurnoHist],
+    *,
+    excluir_genericos: bool = True,
+) -> list[FilaTurnoHist]:
+    """Aplica filtro de universo + QUALIFY de unicidad (espejo pre_int→turnos)."""
+    buckets: dict[tuple, list[FilaTurnoHist]] = {}
+    for f in filas:
+        if excluir_genericos and not en_universo_faceid(f.rutasi):
+            continue
+        buckets.setdefault(f.clave_unicidad, []).append(f)
+    out: list[FilaTurnoHist] = []
+    for group in buckets.values():
+        elegido = elegir_turno_unicidad(group)
+        if elegido is not None:
+            out.append(elegido)
+    return out
+
+
 # --- Cargos / enriquecimiento (espejo del CTE output; no toca marcas) ---
 
 CARGO_SUBGERENTE = "Subgerente"

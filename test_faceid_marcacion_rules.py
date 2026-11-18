@@ -9,6 +9,7 @@ from faceid_marcacion_rules import (
     CargoAsignacion,
     EquipoFaceid,
     FilaMarca,
+    FilaTurnoHist,
     TurnoClave,
     agregar_nombres_cargo,
     codigos_equipos_para_marcas,
@@ -17,14 +18,19 @@ from faceid_marcacion_rules import (
     deducir_marca,
     deducir_marcas,
     deduplicar_equipos_enriq,
+    deduplicar_turnos_faceid,
     elegir_equipo_enriquecimiento,
     elegir_marca_lado,
+    elegir_turno_unicidad,
+    en_universo_faceid,
     en_ventana,
     enriquecer_turno_cargos,
     enriquecer_turno_por_equipos,
+    es_rut_generico,
     estado_faceid,
     fin_turno,
     inicio_turno,
+    nombre_asistente_desde_hist,
 )
 
 
@@ -535,6 +541,161 @@ class EquiposEnriqUnicidadTest(unittest.TestCase):
         self.assertIn(2657, cods)
         marcas = deducir_marcas([marca_en_2657])
         self.assertEqual(len(marcas), 1)
+
+
+class HistTbUnicidadYNombreTest(unittest.TestCase):
+    """
+    Espejo de pre_int desde cr_asistencia_hist_tb:
+    1) TIT vs NOR mismo (rutasi, her, instalacion, empresa) → queda TIT
+    2) relevo partido con 90000009 + persona real → excluye genérico; nombre = persona
+    3) misma persona en dos puestos PPC (mismo her/instalacion) → 1 fila
+    """
+
+    def test_excluye_ruts_genericos_del_universo(self) -> None:
+        self.assertTrue(es_rut_generico("90000009"))
+        self.assertTrue(es_rut_generico(90000001))
+        self.assertFalse(es_rut_generico("15685810"))
+        self.assertFalse(en_universo_faceid("90000002"))
+        self.assertFalse(en_universo_faceid(""))
+        self.assertTrue(en_universo_faceid("15685810"))
+
+    def test_caso1_titular_nor_y_tit_mismo_turno_prefiere_tit(self) -> None:
+        # INACAP Iquique 17/11 NN6, rut 15685810: NOR en su puesto + TIT cubriendo.
+        her = datetime(2026, 11, 17, 20, 0)
+        hsr = datetime(2026, 11, 18, 8, 0)
+        nor = FilaTurnoHist(
+            rutasi="15685810",
+            her=her,
+            hsr=hsr,
+            instalacion_rol="INACAP IQUIQUE",
+            empresa="Security",
+            tipo="NOR",
+            rutrol="15685810",
+            turno="NN6",
+            dia=date(2026, 11, 17),
+            nombrerol="GUARDIA TITULAR",
+            relevo=None,
+        )
+        tit = FilaTurnoHist(
+            rutasi="15685810",
+            her=her,
+            hsr=hsr,
+            instalacion_rol="INACAP IQUIQUE",
+            empresa="Security",
+            tipo="TIT",
+            rutrol="99990001",
+            turno="NN6",
+            dia=date(2026, 11, 17),
+            nombrerol="PUESTO CUBIERTO",
+            relevo="15685810 | 8:00PM / 8:00AM | GUARDIA TITULAR",
+        )
+        elegido = elegir_turno_unicidad([nor, tit])
+        assert elegido is not None
+        self.assertEqual(elegido.tipo, "TIT")
+        self.assertEqual(elegido.rutrol, "99990001")
+        dedup = deduplicar_turnos_faceid([nor, tit])
+        self.assertEqual(len(dedup), 1)
+        self.assertEqual(dedup[0].tipo, "TIT")
+        self.assertEqual(dedup[0].nombre_asistente, "GUARDIA TITULAR")
+
+    def test_caso2_relevo_partido_excluye_90000009_nombre_persona_real(self) -> None:
+        # Lider Lo Barnechea 443 24/09 T90: primera parte Apoyo General 90000009.
+        her = datetime(2026, 9, 24, 8, 0)
+        hsr = datetime(2026, 9, 24, 20, 0)
+        relevo = (
+            "90000009 | 8:00AM / 2:00PM | Apoyo General || "
+            "16105422 | 2:00PM / 8:00PM | JUAN PEREZ"
+        )
+        # hist_tb ya eligió rutasi=persona real; FaceID excluye la fila genérica.
+        fila_dummy = FilaTurnoHist(
+            rutasi="90000009",
+            her=her,
+            hsr=datetime(2026, 9, 24, 14, 0),
+            instalacion_rol="LIDER LO BARNECHEA 443",
+            empresa="Security",
+            tipo="EXR",
+            rutrol="161054",
+            turno="T90",
+            dia=date(2026, 9, 24),
+            nombrerol="PUESTO PPC",
+            relevo=relevo,
+        )
+        fila_real = FilaTurnoHist(
+            rutasi="16105422",
+            her=her,
+            hsr=hsr,
+            instalacion_rol="LIDER LO BARNECHEA 443",
+            empresa="Security",
+            tipo="EXR",
+            rutrol="162576",
+            turno="T90",
+            dia=date(2026, 9, 24),
+            nombrerol="PUESTO PPC",
+            relevo=relevo,
+        )
+        self.assertEqual(
+            nombre_asistente_desde_hist(
+                "162576", "16105422", "PUESTO PPC", relevo
+            ),
+            "JUAN PEREZ",
+        )
+        # No debe quedarse con el último texto a ciegas si rutasi es el del primer tramo.
+        self.assertEqual(
+            nombre_asistente_desde_hist(
+                "161054", "90000009", "PUESTO PPC", relevo
+            ),
+            "Apoyo General",
+        )
+        dedup = deduplicar_turnos_faceid([fila_dummy, fila_real])
+        self.assertEqual(len(dedup), 1)
+        self.assertEqual(dedup[0].rutasi, "16105422")
+        self.assertEqual(dedup[0].nombre_asistente, "JUAN PEREZ")
+
+    def test_caso3_misma_persona_dos_puestos_ppc_una_fila(self) -> None:
+        # UST Ejército rutasi 13665558 en puestos 160624 y 162666, mismo her/instalacion.
+        her = datetime(2026, 11, 17, 8, 0)
+        hsr_a = datetime(2026, 11, 17, 16, 0)
+        hsr_b = datetime(2026, 11, 17, 20, 0)  # tramo más largo / hsr más tarde
+        a = FilaTurnoHist(
+            rutasi="13665558",
+            her=her,
+            hsr=hsr_a,
+            instalacion_rol="UST EJERCITO",
+            empresa="Security",
+            tipo="EXR",
+            rutrol="160624",
+            turno="D1",
+            dia=date(2026, 11, 17),
+            nombrerol="PUESTO A",
+            relevo="13665558 | 8:00AM / 4:00PM | ANA LOPEZ",
+        )
+        b = FilaTurnoHist(
+            rutasi="13665558",
+            her=her,
+            hsr=hsr_b,
+            instalacion_rol="UST EJERCITO",
+            empresa="Security",
+            tipo="EXR",
+            rutrol="162666",
+            turno="D1",
+            dia=date(2026, 11, 17),
+            nombrerol="PUESTO B",
+            relevo="13665558 | 8:00AM / 8:00PM | ANA LOPEZ",
+        )
+        elegido = elegir_turno_unicidad([a, b])
+        assert elegido is not None
+        self.assertEqual(elegido.rutrol, "162666")
+        self.assertEqual(elegido.hsr, hsr_b)
+        dedup = deduplicar_turnos_faceid([a, b])
+        self.assertEqual(len(dedup), 1)
+        n_filas, n_unicos = contar_filas_vs_turnos_unicos(
+            [
+                TurnoClave(f.rutasi, f.her, f.instalacion_rol, f.empresa)
+                for f in dedup
+            ]
+        )
+        self.assertEqual(n_filas, n_unicos)
+        self.assertEqual(n_filas, 1)
 
 
 if __name__ == "__main__":

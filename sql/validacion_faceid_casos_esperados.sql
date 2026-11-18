@@ -11,6 +11,8 @@
 --   - Duplicado Correcta + En Revisión → una aceptada
 --   - Salida 3+ h antes del fin → fuera de ventana
 --   - N5 00:00 con entrada 20:00 día anterior → fuera de ventana
+--   - Complemento _24: turno nocturno con salida solo en _24 y día ausente del hist
+--     → marca_salida poblada; si el día ya está en hist → se ignora _24
 
 WITH martabid_vista AS (
   SELECT

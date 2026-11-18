@@ -15,6 +15,11 @@
 --   * Si hay varias válidas, se elige la más cercana a la hora de referencia (inicio/fin).
 --   * Universo: solo turnos con rutasi no vacío (sin fallback a rutrol).
 --
+-- Complemento en vivo: marcas_raw une el hist diario (carga ~08:00, cubre hasta ayer)
+-- con cr_marcas_face_id_24 (cada ~5 min). Solo entran filas de _24 con
+-- fecha > MAX(fecha) del hist: el hist tiene precedencia apenas carga un día, y las
+-- salidas de turnos nocturnos de hoy no quedan ocultas en el portal hasta mañana.
+--
 -- Costo: marcas prefiltradas por fecha_desde del rol (−1/+1 día) y solo columnas necesarias.
 -- jefes_instalacion: jefes (JEFE_WFSA activos) asignados a la instalación en usuario_instalaciones.
 
@@ -43,7 +48,31 @@ marcas_raw AS (
     marc.revision,
     marc.motivo_no_uso,
     DATETIME(marc.fecha, marc.hora) AS marca_ts
-  FROM `worldwide-470917.cr_reportes.cr_marcas_face_id_hist` marc
+  FROM (
+    SELECT
+      cod_dispositivo,
+      rut,
+      fecha,
+      hora,
+      tipo,
+      revision,
+      motivo_no_uso
+    FROM `worldwide-470917.cr_reportes.cr_marcas_face_id_hist`
+    UNION ALL
+    SELECT
+      cod_dispositivo,
+      rut,
+      fecha,
+      hora,
+      tipo,
+      revision,
+      motivo_no_uso
+    FROM `worldwide-470917.cr_reportes.cr_marcas_face_id_24`
+    WHERE fecha > (
+      SELECT MAX(fecha)
+      FROM `worldwide-470917.cr_reportes.cr_marcas_face_id_hist`
+    )
+  ) marc
   INNER JOIN equipos eq
     ON eq.cod = marc.cod_dispositivo
   CROSS JOIN params p

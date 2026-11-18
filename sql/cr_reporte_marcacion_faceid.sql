@@ -13,14 +13,25 @@
 --   * Excepción Art. 22: si no hay aceptada en la ventana y todas las marcas no-Objetadas de
 --     ese lado en la ventana tienen motivo 'Colaborador Art. 22', se cuenta esa marca.
 --   * Si hay varias válidas, se elige la más cercana a la hora de referencia (inicio/fin).
---   * Universo: solo turnos con rutasi no vacío (sin fallback a rutrol).
+--   * Universo: solo turnos con rutasi no vacío (sin fallback a rutrol) y rutasi
+--     fuera de RUT genéricos ControlRoll ('90000001','90000002','90000009').
+--
+-- Fuente de turnos: cr_reportes.cr_asistencia_hist_tb (materializa
+-- vw_cr_asistencia_hist_tb_relevos_agg vía scheduled query 68f108f6: tit_cubre,
+-- combina tramos de relevo, prefiere persona real sobre 90000009). Misma fuente
+-- que el panel Cobertura. No usar cr_vistas_reporte.cr_asistencia_hist (semanal
+-- sin agregar relevos: duplicaba claves rutasi+her+instalacion+empresa).
+-- Resguardo: QUALIFY 1 fila por (rutasi, her, instalacion_rol, empresa) preferiendo
+-- TIT/EXR sobre NOR, luego hsr más tardío, desempate determinista.
+-- nombre_asistente: nombrerol si rutrol=rutasi; si no, nombre del tramo de relevo
+-- cuyo RUT coincide con rutasi (no el último texto tras ' || ').
 --
 -- Complemento en vivo: marcas_raw une el hist diario (carga ~08:00, cubre hasta ayer)
 -- con cr_marcas_face_id_24 (cada ~5 min). Solo entran filas de _24 con
 -- fecha > MAX(fecha) del hist: el hist tiene precedencia apenas carga un día, y las
 -- salidas de turnos nocturnos de hoy no quedan ocultas en el portal hasta mañana.
 --
--- Costo: marcas prefiltradas por fecha_desde del rol (−1/+1 día) y solo columnas necesarias.
+-- Costo: turnos y marcas prefiltrados por fecha_desde del rol; solo columnas necesarias.
 -- jefes_instalacion: jefes (JEFE_WFSA activos) asignados a la instalación en usuario_instalaciones.
 --
 -- Cargos (subgerente / jefe zonal / supervisor):
@@ -160,6 +171,12 @@ marcas AS (
   WHERE no_objetada
 ),
 
+-- Mapeo desde cr_asistencia_hist_tb (salida de vw_cr_asistencia_hist_tb_relevos_agg):
+--   dia, cliente_rol, instalacion_rol, rutrol, rutasi, nombrerol, relevo, cargo,
+--   turno, her, hsr, empresa, tipo, equip_faceid, inst_esporadica.
+-- instalacion_rol / cliente_rol ya vienen vía instalacion_reporte_emp / cliente_reporte
+-- en la vista origen; equip_faceid e inst_esporadica ya calculados sobre el nombre
+-- ControlRoll (antes del remap). Validar tipos/tipos en BQ al desplegar.
 pre_int AS (
   SELECT
     hist.dia,
@@ -169,25 +186,61 @@ pre_int AS (
     hist.rutasi,
     (
       CASE
-        WHEN hist.rutrol = hist.rutasi THEN hist.nombrerol
-        ELSE TRIM(ARRAY_REVERSE(SPLIT(hist.relevo, ' | '))[OFFSET(0)])
+        WHEN REGEXP_REPLACE(CAST(hist.rutrol AS STRING), r'[^0-9]', '')
+           = REGEXP_REPLACE(CAST(hist.rutasi AS STRING), r'[^0-9]', '')
+          THEN hist.nombrerol
+        ELSE COALESCE(
+          (
+            SELECT TRIM(ARRAY_REVERSE(SPLIT(TRIM(seg), ' | '))[SAFE_OFFSET(0)])
+            FROM UNNEST(SPLIT(IFNULL(hist.relevo, ''), ' || ')) AS seg
+            WHERE REGEXP_REPLACE(
+                    TRIM(SPLIT(TRIM(seg), ' | ')[SAFE_OFFSET(0)]),
+                    r'[^0-9]',
+                    ''
+                  ) = REGEXP_REPLACE(CAST(hist.rutasi AS STRING), r'[^0-9]', '')
+            LIMIT 1
+          ),
+          hist.nombrerol
+        )
       END
     ) AS nombre_asistente,
-    (CASE WHEN hist.rutrol = hist.rutasi THEN 'NO' ELSE 'SI' END) AS reemplazo,
+    (
+      CASE
+        WHEN REGEXP_REPLACE(CAST(hist.rutrol AS STRING), r'[^0-9]', '')
+           = REGEXP_REPLACE(CAST(hist.rutasi AS STRING), r'[^0-9]', '')
+          THEN 'NO'
+        ELSE 'SI'
+      END
+    ) AS reemplazo,
     hist.cargo,
     hist.turno,
     hist.her,
     hist.hsr,
     hist.empresa,
-    (CASE WHEN e.instalacion IS NULL THEN FALSE ELSE TRUE END) AS inst_esporadica,
-    (CASE WHEN d.equipo_nombre IS NULL THEN hist.instalacion_rol ELSE d.equipo_nombre END) AS equip_faceid
-  FROM `worldwide-470917.cr_vistas_reporte.cr_asistencia_hist` hist
-  LEFT JOIN `worldwide-470917.mantenedores.asignacion_faceid` d
-    ON hist.instalacion_rol = d.instalacion
-   AND hist.empresa = d.empresa
-  LEFT JOIN `worldwide-470917.mantenedores.instalaciones_esporadicas` e
-    ON hist.instalacion_rol = e.instalacion
-   AND hist.empresa = e.empresa
+    hist.inst_esporadica,
+    hist.equip_faceid,
+    hist.tipo
+  FROM `worldwide-470917.cr_reportes.cr_asistencia_hist_tb` hist
+  CROSS JOIN params p
+  WHERE DATE(hist.dia) >= p.fecha_desde
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY
+      CAST(hist.rutasi AS STRING),
+      hist.her,
+      hist.instalacion_rol,
+      hist.empresa
+    ORDER BY
+      CASE UPPER(TRIM(CAST(hist.tipo AS STRING)))
+        WHEN 'TIT' THEN 0
+        WHEN 'EXR' THEN 0
+        WHEN 'NOR' THEN 1
+        ELSE 2
+      END ASC,
+      hist.hsr DESC NULLS LAST,
+      CAST(hist.rutrol AS STRING) ASC,
+      hist.turno ASC,
+      CAST(hist.dia AS STRING) ASC
+  ) = 1
 ),
 
 turnos AS (
@@ -222,7 +275,6 @@ turnos AS (
       END
     ) AS fin_turno
   FROM pre_int hist
-  CROSS JOIN params p
   -- Enriquecimiento: una sola fila por (nombre, empresa). Marcas siguen usando `equipos` (todos los cod).
   LEFT JOIN equipos_enriq eq
     ON hist.equip_faceid = eq.nombre
@@ -230,9 +282,9 @@ turnos AS (
   LEFT JOIN equipos_lw_enriq eq_lw
     ON hist.equip_faceid = eq_lw.nombre
    AND hist.empresa = eq_lw.empresa
-  WHERE DATE(hist.dia) >= p.fecha_desde
-    AND hist.rutasi IS NOT NULL
-    AND hist.rutasi <> ''
+  WHERE hist.rutasi IS NOT NULL
+    AND CAST(hist.rutasi AS STRING) <> ''
+    AND CAST(hist.rutasi AS STRING) NOT IN ('90000001', '90000002', '90000009')
 ),
 
 entrada_cands AS (

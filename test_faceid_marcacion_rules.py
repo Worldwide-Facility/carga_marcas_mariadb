@@ -30,7 +30,9 @@ from faceid_marcacion_rules import (
     estado_faceid,
     fin_turno,
     inicio_turno,
+    marcas_con_empresa_catalogo,
     nombre_asistente_desde_hist,
+    resolver_empresa_marca,
 )
 
 
@@ -541,6 +543,68 @@ class EquiposEnriqUnicidadTest(unittest.TestCase):
         self.assertIn(2657, cods)
         marcas = deducir_marcas([marca_en_2657])
         self.assertEqual(len(marcas), 1)
+
+
+class EquipoRetiradoCatalogoTest(unittest.TestCase):
+    """
+    Espejo del LEFT JOIN en marcas_raw: equipo fuera del catálogo vigente
+    (WRITE_TRUNCATE de cr_equipos_faceid) no debe perder marcas históricas.
+    Caso: RUT 16119224, 18-11-2026, equipo 2427 reemplazado por 2695.
+    """
+
+    def setUp(self) -> None:
+        # Catálogo vigente: solo el equipo nuevo (2695); 2427 ya no está.
+        self.equipos_vigentes = [
+            EquipoFaceid("INSTALACION X", "Security", 2695, datetime(2026, 11, 19, 10, 0)),
+        ]
+        self.por_cod = {e.cod: e.empresa for e in self.equipos_vigentes}
+        self.marca_2427 = fila(
+            empresa="Security",
+            rut="16119224",
+            fecha=date(2026, 11, 18),
+            hora=time(19, 55),
+            tipo="Entrada Laboral",
+            revision="Correcta",
+        )
+
+    def test_equipo_catalogado_usa_empresa_del_catalogo(self) -> None:
+        self.assertEqual(
+            resolver_empresa_marca(2695, "Industry", self.por_cod),
+            "Security",
+        )
+
+    def test_equipo_retirado_usa_empresa_de_la_marca(self) -> None:
+        # Bug previo (INNER JOIN): 2427 no está → marca descartada → 'No Marca'.
+        self.assertIsNone(self.por_cod.get(2427))
+        self.assertEqual(
+            resolver_empresa_marca(2427, "Security", self.por_cod),
+            "Security",
+        )
+
+    def test_cod_dispositivo_cero_o_nulo_se_excluye(self) -> None:
+        self.assertIsNone(resolver_empresa_marca(0, "Security", self.por_cod))
+        self.assertIsNone(resolver_empresa_marca(None, "Security", self.por_cod))
+        self.assertIsNone(resolver_empresa_marca(2427, None, self.por_cod))
+        self.assertIsNone(resolver_empresa_marca(2427, "  ", self.por_cod))
+
+    def test_marca_equipo_retirado_entra_al_cruce_por_rut_empresa(self) -> None:
+        resueltas = marcas_con_empresa_catalogo(
+            [(2427, "Security", self.marca_2427), (0, "Security", self.marca_2427)],
+            self.equipos_vigentes,
+        )
+        self.assertEqual(len(resueltas), 1)
+        self.assertEqual(resueltas[0].empresa, "Security")
+        self.assertEqual(resueltas[0].rut, "16119224")
+        dedup = deducir_marcas(resueltas)
+        self.assertEqual(len(dedup), 1)
+        self.assertTrue(dedup[0].aceptada)
+        # Cruce con turno: misma empresa + RUT + ventana ±3 h.
+        inicio = inicio_turno(date(2026, 11, 18), time(20, 0))
+        self.assertTrue(en_ventana(dedup[0].marca_ts, inicio))
+        lado = elegir_marca_lado(dedup, inicio)
+        self.assertIsNotNone(lado)
+        assert lado is not None
+        self.assertEqual(lado.hora, time(19, 55))
 
 
 class HistTbUnicidadYNombreTest(unittest.TestCase):

@@ -29,6 +29,7 @@ from faceid_marcacion_rules import (
     es_rut_generico,
     estado_faceid,
     motivo_excluido_reemplazo,
+    motivo_sin_entrada_laboral,
     ruts_validos_reemplazo,
     fin_turno,
     inicio_turno,
@@ -915,3 +916,120 @@ class ReemplazoEnRevisionTest(unittest.TestCase):
         self.assertIsNotNone(salida)
         self.assertEqual(estado_faceid(True, True, True), "OK")
 
+
+
+class SinEntradaLaboralSalidaTest(unittest.TestCase):
+    """'Sin entrada laboral registrada' cuenta solo como salida, en todos los turnos."""
+
+    def test_motivo_con_y_sin_punto(self) -> None:
+        self.assertTrue(motivo_sin_entrada_laboral("Sin entrada laboral registrada."))
+        self.assertTrue(motivo_sin_entrada_laboral("Sin entrada laboral registrada"))
+        self.assertTrue(motivo_sin_entrada_laboral("  Sin entrada laboral registrada.  "))
+        self.assertFalse(motivo_sin_entrada_laboral("Fuera de tolerancia de horario."))
+        self.assertFalse(motivo_sin_entrada_laboral("Marca Utilizada Correctamente"))
+        self.assertFalse(motivo_sin_entrada_laboral(None))
+
+    def test_salida_en_ventana_cuenta_en_cualquier_turno(self) -> None:
+        dia = date(2026, 11, 23)
+        fin = fin_turno(dia, time(8, 0), time(20, 0))
+        marcas = deducir_marcas(
+            [
+                fila(
+                    rut="16119224",
+                    fecha=dia,
+                    hora=time(20, 10, 0),
+                    tipo="Salida Laboral",
+                    revision="En Revisión",
+                    motivo="Sin entrada laboral registrada.",
+                )
+            ]
+        )
+        sal = [m for m in marcas if m.tipo == "Salida Laboral" and en_ventana(m.marca_ts, fin)]
+        self.assertTrue(sal and sal[0].motivo_sin_entrada)
+        self.assertIsNone(elegir_marca_lado(sal, fin))
+        elegida = elegir_marca_lado(sal, fin, aceptar_sin_entrada_salida=True)
+        self.assertIsNotNone(elegida)
+        self.assertEqual(elegida.hora, time(20, 10, 0))
+
+    def test_no_se_usa_como_entrada(self) -> None:
+        dia = date(2026, 11, 23)
+        inicio = inicio_turno(dia, time(8, 0))
+        marcas = deducir_marcas(
+            [
+                fila(
+                    rut="16119224",
+                    fecha=dia,
+                    hora=time(8, 5, 0),
+                    tipo="Entrada Laboral",
+                    revision="En Revisión",
+                    motivo="Sin entrada laboral registrada.",
+                )
+            ]
+        )
+        ent = [m for m in marcas if m.tipo == "Entrada Laboral" and en_ventana(m.marca_ts, inicio)]
+        self.assertIsNone(elegir_marca_lado(ent, inicio))
+        self.assertIsNone(elegir_marca_lado(ent, inicio, aceptar_en_revision_reemplazo=False))
+
+    def test_fuera_de_ventana_hsr_no_cuenta(self) -> None:
+        dia = date(2026, 11, 23)
+        fin = fin_turno(dia, time(8, 0), time(20, 0))
+        marcas = deducir_marcas(
+            [
+                fila(
+                    rut="12044486",
+                    fecha=dia,
+                    hora=time(15, 10, 45),
+                    tipo="Salida Laboral",
+                    revision="En Revisión",
+                    motivo="Sin entrada laboral registrada.",
+                )
+            ]
+        )
+        sal = [m for m in marcas if m.tipo == "Salida Laboral" and en_ventana(m.marca_ts, fin)]
+        self.assertEqual(sal, [])
+        self.assertIsNone(elegir_marca_lado(sal, fin, aceptar_sin_entrada_salida=True))
+
+    def test_objetada_no_cuenta(self) -> None:
+        dia = date(2026, 11, 23)
+        fin = fin_turno(dia, time(8, 0), time(20, 0))
+        marcas = deducir_marcas(
+            [
+                fila(
+                    rut="16119224",
+                    fecha=dia,
+                    hora=time(20, 10, 0),
+                    tipo="Salida Laboral",
+                    revision="Objetada",
+                    motivo="Sin entrada laboral registrada.",
+                )
+            ]
+        )
+        self.assertEqual(marcas, [])
+
+    def test_aceptada_sigue_ganando(self) -> None:
+        dia = date(2026, 11, 23)
+        fin = fin_turno(dia, time(8, 0), time(20, 0))
+        marcas = deducir_marcas(
+            [
+                fila(
+                    rut="16119224",
+                    fecha=dia,
+                    hora=time(20, 40, 0),
+                    tipo="Salida Laboral",
+                    revision="En Revisión",
+                    motivo="Sin entrada laboral registrada.",
+                ),
+                fila(
+                    rut="16119224",
+                    fecha=dia,
+                    hora=time(20, 2, 0),
+                    tipo="Salida Laboral",
+                    revision="Correcta",
+                ),
+            ]
+        )
+        sal = [m for m in marcas if m.tipo == "Salida Laboral" and en_ventana(m.marca_ts, fin)]
+        elegida = elegir_marca_lado(sal, fin, aceptar_sin_entrada_salida=True)
+        assert elegida is not None
+        self.assertTrue(elegida.aceptada)
+        self.assertEqual(elegida.hora, time(20, 2, 0))

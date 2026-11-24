@@ -19,6 +19,11 @@
 --     costo (texto 'CECOS': 'CECOS (…) sin geolocalización configurada' y
 --     'Dispositivo sin CECOS configurado para evaluar uso PPC').
 --     'Marcación sin geolocalización obtenida' no se excluye (no es GPS lejos ni CECOS).
+--   * Excepción salida 'Sin entrada laboral registrada': si no hay aceptada en la
+--     ventana de salida, se cuenta una marca no-Objetada de rutasi (nunca de rutrol)
+--     con ese motivo (con o sin punto final) que caiga en ±3 h de hsr. Solo aplica
+--     en salida_validas, en todos los turnos (no solo reemplazos). No se usa en
+--     entrada_validas.
 --   * Si hay varias válidas, se elige la más cercana a la hora de referencia (inicio/fin).
 --   * Universo: solo turnos con rutasi no vacío (sin fallback a rutrol) y rutasi
 --     fuera de RUT genéricos ControlRoll ('90000001','90000002','90000009').
@@ -178,7 +183,13 @@ marcas_dedup AS (
         REGEXP_CONTAINS(LOWER(IFNULL(motivo_no_uso, '')), r'fuera de tolerancia por gps')
         OR REGEXP_CONTAINS(UPPER(IFNULL(motivo_no_uso, '')), r'CECOS')
       )
-    ) AS excluida_gps_o_cecos
+    ) AS excluida_gps_o_cecos,
+    -- 'Sin entrada laboral registrada' (con o sin punto): solo se usa en salida_validas.
+    LOGICAL_OR(
+      IFNULL(revision, '') != 'Objetada'
+      AND REGEXP_REPLACE(TRIM(IFNULL(motivo_no_uso, '')), r'\.+$', '')
+          = 'Sin entrada laboral registrada'
+    ) AS motivo_sin_entrada
   FROM marcas_raw
   GROUP BY empresa, rut, fecha, hora, tipo, marca_ts
 ),
@@ -193,7 +204,8 @@ marcas AS (
     marca_ts,
     aceptada,
     motivo_art22,
-    excluida_gps_o_cecos
+    excluida_gps_o_cecos,
+    motivo_sin_entrada
   FROM marcas_dedup
   WHERE no_objetada
 ),
@@ -410,6 +422,7 @@ salida_cands AS (
     m.aceptada,
     m.motivo_art22,
     m.excluida_gps_o_cecos,
+    m.motivo_sin_entrada,
     ABS(DATETIME_DIFF(m.marca_ts, t.fin_turno, SECOND)) AS diferencia
   FROM turnos t
   INNER JOIN marcas m
@@ -448,10 +461,11 @@ salida_validas AS (
           AND LENGTH(REGEXP_REPLACE(IFNULL(CAST(rutrol AS STRING), ''), r'[^0-9]', '')) >= 7
           AND NOT excluida_gps_o_cecos
         )
+     OR (hay_aceptada = 0 AND motivo_sin_entrada)
 ),
 
 salida_best AS (
-  SELECT * EXCEPT (rn, aceptada, motivo_art22, hay_aceptada, todas_art22, excluida_gps_o_cecos)
+  SELECT * EXCEPT (rn, aceptada, motivo_art22, hay_aceptada, todas_art22, excluida_gps_o_cecos, motivo_sin_entrada)
   FROM (
     SELECT
       v.*,

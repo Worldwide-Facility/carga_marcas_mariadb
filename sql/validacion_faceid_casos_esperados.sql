@@ -138,3 +138,6 @@ UNION ALL
 SELECT * FROM equipo_retirado_vista
 ORDER BY seccion, dia, hora_entrada
 ;
+
+-- Excepcion salida: motivo 'Sin entrada laboral registrada' (con o sin punto) solo en salida_validas,
+-- en todos los turnos, si no hay aceptada y la marca de rutasi cae en la ventana de hsr. No aplica en entrada_validas.

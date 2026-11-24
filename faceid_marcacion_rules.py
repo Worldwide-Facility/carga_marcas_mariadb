@@ -16,6 +16,7 @@ VENTANA = timedelta(hours=3)
 
 MOTIVO_OK = "Marca Utilizada Correctamente"
 MOTIVO_ART22 = "Colaborador Art. 22"
+MOTIVO_SIN_ENTRADA = "Sin entrada laboral registrada"
 REVISION_CORRECTA = "Correcta"
 REVISION_OBJETADA = "Objetada"
 TIPO_ENTRADA = "Entrada Laboral"
@@ -73,6 +74,7 @@ class MarcaDedup:
     no_objetada: bool
     motivo_art22: bool
     excluida_gps_o_cecos: bool
+    motivo_sin_entrada: bool
 
 
 def _norm(value: str | None) -> str:
@@ -83,6 +85,15 @@ def motivo_excluido_reemplazo(motivo_no_uso: str | None) -> bool:
     """True si el motivo es GPS lejos o centro de costo (CECOS)."""
     mot = motivo_no_uso or ""
     return "fuera de tolerancia por gps" in mot.lower() or "CECOS" in mot.upper()
+
+
+def motivo_sin_entrada_laboral(motivo_no_uso: str | None) -> bool:
+    """True si el motivo es 'Sin entrada laboral registrada' (con o sin punto final).
+
+    Esas marcas son salidas: la vista solo las acepta en salida_validas.
+    """
+    mot = (motivo_no_uso or "").strip().rstrip(".")
+    return mot.lower() == "sin entrada laboral registrada"
 
 
 def ruts_validos_reemplazo(rutasi: object | None, rutrol: object | None) -> bool:
@@ -105,6 +116,7 @@ def deducir_marca(filas: Sequence[FilaMarca]) -> MarcaDedup:
     no_objetada = False
     motivo_art22 = False
     excluida_gps_o_cecos = False
+    motivo_sin_entrada = False
     for f in filas:
         rev = _norm(f.revision)
         mot = _norm(f.motivo_no_uso)
@@ -117,6 +129,8 @@ def deducir_marca(filas: Sequence[FilaMarca]) -> MarcaDedup:
             motivo_art22 = True
         if motivo_excluido_reemplazo(mot):
             excluida_gps_o_cecos = True
+        if motivo_sin_entrada_laboral(mot):
+            motivo_sin_entrada = True
 
     return MarcaDedup(
         empresa=base.empresa,
@@ -129,6 +143,7 @@ def deducir_marca(filas: Sequence[FilaMarca]) -> MarcaDedup:
         no_objetada=no_objetada,
         motivo_art22=motivo_art22,
         excluida_gps_o_cecos=excluida_gps_o_cecos,
+        motivo_sin_entrada=motivo_sin_entrada,
     )
 
 
@@ -166,12 +181,15 @@ def elegir_marca_lado(
     referencia: datetime,
     *,
     aceptar_en_revision_reemplazo: bool = False,
+    aceptar_sin_entrada_salida: bool = False,
 ) -> MarcaDedup | None:
     """
     candidatas: marcas no-Objetadas del tipo correcto ya filtradas por ventana.
     Prioridad: aceptadas; si ninguna, Art. 22 solo si TODAS tienen motivo Art. 22;
     si tampoco, y aceptar_en_revision_reemplazo (rutasi ≠ rutrol, ambos ≥ 7 dígitos),
-    las no excluidas por GPS lejos / CECOS. Entre válidas, la más cercana a referencia.
+    las no excluidas por GPS lejos / CECOS; si tampoco, y aceptar_sin_entrada_salida
+    (solo el caller de salida debe activarlo), las de motivo
+    'Sin entrada laboral registrada'. Entre válidas, la más cercana a referencia.
     Nunca considera marcas de rutrol: el caller solo pasa marcas de rutasi.
     """
     if not candidatas:
@@ -184,6 +202,15 @@ def elegir_marca_lado(
         pool = list(candidatas)
     elif aceptar_en_revision_reemplazo:
         pool = [m for m in candidatas if not m.excluida_gps_o_cecos]
+        if not pool:
+            if aceptar_sin_entrada_salida:
+                pool = [m for m in candidatas if m.motivo_sin_entrada]
+                if not pool:
+                    return None
+            else:
+                return None
+    elif aceptar_sin_entrada_salida:
+        pool = [m for m in candidatas if m.motivo_sin_entrada]
         if not pool:
             return None
     else:

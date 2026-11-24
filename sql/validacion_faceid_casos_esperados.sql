@@ -66,7 +66,7 @@ martabid_fuentes AS (
     AND marc.fecha BETWEEN DATE('2026-11-16') AND DATE('2026-11-17')
     AND marc.tipo IN ('Entrada Laboral', 'Salida Laboral')
     AND marc.cod_dispositivo IS NOT NULL
-    AND marc.cod_dispositivo != 0
+    AND marc.cod_dispositivo != '0'
 ),
 
 -- Equipo 2427 fuera del catálogo vigente: marcas hist deben verse vía marc.empresa.
@@ -96,7 +96,7 @@ equipo_retirado_fuentes AS (
     AND marc.fecha BETWEEN DATE('2026-11-18') AND DATE('2026-11-19')
     AND marc.tipo IN ('Entrada Laboral', 'Salida Laboral')
     AND marc.cod_dispositivo IS NOT NULL
-    AND marc.cod_dispositivo != 0
+    AND marc.cod_dispositivo != '0'
 ),
 
 equipo_retirado_vista AS (

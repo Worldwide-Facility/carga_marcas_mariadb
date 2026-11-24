@@ -776,11 +776,14 @@ class ReemplazoEnRevisionTest(unittest.TestCase):
         marcas = deducir_marcas(filas)
         return [m for m in marcas if m.tipo == "Entrada Laboral" and en_ventana(m.marca_ts, inicio)], inicio
 
-    def test_ruts_validos_detecta_relevo_y_rechaza_rutrol_corto(self) -> None:
+    def test_ruts_validos_exige_largo_solo_en_rutasi(self) -> None:
         self.assertTrue(ruts_validos_reemplazo("12044486", "21056122"))
-        self.assertFalse(ruts_validos_reemplazo("10649977", "161225"))  # rutrol 6 dígitos
+        # rutrol corto (p. ej. Duncan 21483710 cubriendo 160887) ahora es válido
+        self.assertTrue(ruts_validos_reemplazo("10649977", "161225"))
+        self.assertTrue(ruts_validos_reemplazo("21483710", "160887"))
         self.assertFalse(ruts_validos_reemplazo("12044486", "12044486"))  # mismo RUT
         self.assertFalse(ruts_validos_reemplazo("12044486", None))
+        self.assertFalse(ruts_validos_reemplazo("123456", "21056122"))  # rutasi corto
 
     def test_motivo_gps_y_cecos_se_excluyen(self) -> None:
         self.assertTrue(

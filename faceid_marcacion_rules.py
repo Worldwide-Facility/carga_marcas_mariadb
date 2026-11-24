@@ -2,7 +2,7 @@
 Reglas puras del cruce FaceID ↔ turno (espejo de sql/cr_reporte_marcacion_faceid.sql).
 
 No habla con BigQuery: sirve para documentar y testear aceptación, ventana ±3 h, Art. 22
-y la excepción de reemplazo (RUT válidos, sin GPS lejos ni CECOS).
+y la excepción de reemplazo (rutasi con ≥ 7 dígitos, sin GPS lejos ni CECOS).
 """
 
 from __future__ import annotations
@@ -97,10 +97,13 @@ def motivo_sin_entrada_laboral(motivo_no_uso: str | None) -> bool:
 
 
 def ruts_validos_reemplazo(rutasi: object | None, rutrol: object | None) -> bool:
-    """True si ambos RUT tienen ≥ 7 dígitos y son distintos (relevo real, no rutrol corto)."""
+    """True si es relevo: rutasi tiene ≥ 7 dígitos, rutrol está presente y son distintos.
+
+    No se exige largo de rutrol (un jefe de grupo puede tener 5 o 6 dígitos).
+    """
     a = "".join(ch for ch in str(rutasi or "") if ch.isdigit())
     r = "".join(ch for ch in str(rutrol or "") if ch.isdigit())
-    return len(a) >= 7 and len(r) >= 7 and a != r
+    return len(a) >= 7 and len(r) > 0 and a != r
 
 
 def deducir_marca(filas: Sequence[FilaMarca]) -> MarcaDedup:
@@ -186,7 +189,7 @@ def elegir_marca_lado(
     """
     candidatas: marcas no-Objetadas del tipo correcto ya filtradas por ventana.
     Prioridad: aceptadas; si ninguna, Art. 22 solo si TODAS tienen motivo Art. 22;
-    si tampoco, y aceptar_en_revision_reemplazo (rutasi ≠ rutrol, ambos ≥ 7 dígitos),
+    si tampoco, y aceptar_en_revision_reemplazo (rutasi ≠ rutrol, rutasi ≥ 7 dígitos),
     las no excluidas por GPS lejos / CECOS; si tampoco, y aceptar_sin_entrada_salida
     (solo el caller de salida debe activarlo), las de motivo
     'Sin entrada laboral registrada'. Entre válidas, la más cercana a referencia.

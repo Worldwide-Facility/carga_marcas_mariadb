@@ -28,6 +28,8 @@ from faceid_marcacion_rules import (
     enriquecer_turno_por_equipos,
     es_rut_generico,
     estado_faceid,
+    motivo_excluido_reemplazo,
+    ruts_validos_reemplazo,
     fin_turno,
     inicio_turno,
     marcas_con_empresa_catalogo,
@@ -764,3 +766,152 @@ class HistTbUnicidadYNombreTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class ReemplazoEnRevisionTest(unittest.TestCase):
+    """Excepción de relevo: RUT válidos, En Revisión en ventana, sin GPS ni CECOS."""
+
+    def _cands(self, *filas: FilaMarca):
+        inicio = inicio_turno(date(2026, 11, 23), time(8, 0))
+        marcas = deducir_marcas(filas)
+        return [m for m in marcas if m.tipo == "Entrada Laboral" and en_ventana(m.marca_ts, inicio)], inicio
+
+    def test_ruts_validos_detecta_relevo_y_rechaza_rutrol_corto(self) -> None:
+        self.assertTrue(ruts_validos_reemplazo("12044486", "21056122"))
+        self.assertFalse(ruts_validos_reemplazo("10649977", "161225"))  # rutrol 6 dígitos
+        self.assertFalse(ruts_validos_reemplazo("12044486", "12044486"))  # mismo RUT
+        self.assertFalse(ruts_validos_reemplazo("12044486", None))
+
+    def test_motivo_gps_y_cecos_se_excluyen(self) -> None:
+        self.assertTrue(
+            motivo_excluido_reemplazo(
+                "Su Marca está fuera de tolerancia por GPS. Está a 1185mts del punto OHLA LOTA."
+            )
+        )
+        self.assertTrue(motivo_excluido_reemplazo("CECOS (214-92-1) sin geolocalización configurada."))
+        self.assertTrue(
+            motivo_excluido_reemplazo(
+                "Fuera de tolerancia. Dispositivo sin CECOS configurado para evaluar uso PPC."
+            )
+        )
+        self.assertFalse(motivo_excluido_reemplazo("Fuera de tolerancia de horario."))
+        self.assertFalse(
+            motivo_excluido_reemplazo(
+                "Fuera de tolerancia. Coincide con turno titular y no puede controlar un PPC con esta marca."
+            )
+        )
+        self.assertFalse(motivo_excluido_reemplazo("Marcación sin geolocalización obtenida."))
+        self.assertFalse(motivo_excluido_reemplazo("No puede evaluar con PPC por no tener ROL titular."))
+
+    def test_horario_en_revision_cuenta_si_ruts_validos(self) -> None:
+        cands, inicio = self._cands(
+            fila(
+                rut="12044486",
+                fecha=date(2026, 11, 23),
+                hora=time(6, 24, 41),
+                tipo="Entrada Laboral",
+                revision="En Revisión",
+                motivo="Fuera de tolerancia de horario.",
+            )
+        )
+        self.assertIsNone(elegir_marca_lado(cands, inicio))
+        elegida = elegir_marca_lado(cands, inicio, aceptar_en_revision_reemplazo=True)
+        self.assertIsNotNone(elegida)
+        self.assertFalse(elegida.aceptada)
+        self.assertEqual(elegida.hora, time(6, 24, 41))
+
+    def test_gps_lejos_no_cuenta_en_reemplazo(self) -> None:
+        cands, inicio = self._cands(
+            fila(
+                rut="12044486",
+                fecha=date(2026, 11, 23),
+                hora=time(8, 5),
+                tipo="Entrada Laboral",
+                revision="En Revisión",
+                motivo="Su Marca está fuera de tolerancia por GPS. Está a 3784mts del punto UNIVERSIDAD EL ALBA.",
+            )
+        )
+        self.assertIsNone(elegir_marca_lado(cands, inicio, aceptar_en_revision_reemplazo=True))
+
+    def test_cecos_no_cuenta_en_reemplazo(self) -> None:
+        cands, inicio = self._cands(
+            fila(
+                rut="12044486",
+                fecha=date(2026, 11, 23),
+                hora=time(8, 5),
+                tipo="Entrada Laboral",
+                revision="En Revisión",
+                motivo="CECOS (214-92-1) sin geolocalización configurada.",
+            )
+        )
+        self.assertIsNone(elegir_marca_lado(cands, inicio, aceptar_en_revision_reemplazo=True))
+
+    def test_dispositivo_sin_cecos_no_cuenta(self) -> None:
+        cands, inicio = self._cands(
+            fila(
+                rut="12044486",
+                fecha=date(2026, 11, 23),
+                hora=time(8, 5),
+                tipo="Entrada Laboral",
+                revision="En Revisión",
+                motivo="Fuera de tolerancia. Dispositivo sin CECOS configurado para evaluar uso PPC.",
+            )
+        )
+        self.assertIsNone(elegir_marca_lado(cands, inicio, aceptar_en_revision_reemplazo=True))
+
+    def test_aceptada_sigue_ganando_en_reemplazo(self) -> None:
+        cands, inicio = self._cands(
+            fila(
+                rut="12044486",
+                fecha=date(2026, 11, 23),
+                hora=time(6, 24),
+                tipo="Entrada Laboral",
+                revision="En Revisión",
+                motivo="Fuera de tolerancia de horario.",
+            ),
+            fila(
+                rut="12044486",
+                fecha=date(2026, 11, 23),
+                hora=time(8, 1),
+                tipo="Entrada Laboral",
+                revision="Correcta",
+            ),
+        )
+        elegida = elegir_marca_lado(cands, inicio, aceptar_en_revision_reemplazo=True)
+        assert elegida is not None
+        self.assertTrue(elegida.aceptada)
+        self.assertEqual(elegida.hora, time(8, 1))
+
+    def test_jeccia_lopez_reemplazo_ok(self) -> None:
+        """Jeccia Lopez Suazo 23-11-2026, rutasi 12044486 / rutrol 21056122, A4 08:00-20:00."""
+        self.assertTrue(ruts_validos_reemplazo("12044486", "21056122"))
+        dia = date(2026, 11, 23)
+        inicio = inicio_turno(dia, time(8, 0))
+        fin = fin_turno(dia, time(8, 0), time(20, 0))
+        marcas = deducir_marcas(
+            [
+                fila(
+                    rut="12044486",
+                    fecha=dia,
+                    hora=time(6, 24, 41),
+                    tipo="Entrada Laboral",
+                    revision="En Revisión",
+                    motivo="Fuera de tolerancia de horario.",
+                ),
+                fila(
+                    rut="12044486",
+                    fecha=dia,
+                    hora=time(20, 31, 11),
+                    tipo="Salida Laboral",
+                    revision="En Revisión",
+                    motivo="Fuera de tolerancia de horario.",
+                ),
+            ]
+        )
+        ent = [m for m in marcas if m.tipo == "Entrada Laboral" and en_ventana(m.marca_ts, inicio)]
+        sal = [m for m in marcas if m.tipo == "Salida Laboral" and en_ventana(m.marca_ts, fin)]
+        entrada = elegir_marca_lado(ent, inicio, aceptar_en_revision_reemplazo=True)
+        salida = elegir_marca_lado(sal, fin, aceptar_en_revision_reemplazo=True)
+        self.assertIsNotNone(entrada)
+        self.assertIsNotNone(salida)
+        self.assertEqual(estado_faceid(True, True, True), "OK")
+

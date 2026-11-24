@@ -17,6 +17,10 @@
 --     18-11-2026, cod_dispositivo 2427 (reemplazado por 2695 el 19-11-2026) → la
 --     marca sigue cruzando; no debe quedar en 'No Marca' solo por ausencia en
 --     cr_equipos_faceid.
+--   - Reemplazo con ambos RUT de ≥ 7 dígitos y marca En Revisión de rutasi en la
+--     ventana ±3 h (p. ej. Fuera de tolerancia de horario.) → cuenta; GPS lejos y
+--     motivos CECOS/centro de costo no cuentan; rutrol corto (5-6 dígitos) no activa
+--     la excepción; nunca se usan marcas de rutrol.
 
 WITH martabid_vista AS (
   SELECT

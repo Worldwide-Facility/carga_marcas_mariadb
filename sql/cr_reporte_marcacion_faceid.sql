@@ -44,6 +44,11 @@
 --   * `equipos` = todos los códigos (para marcas_raw por cod_dispositivo). No deduplicar:
 --     si hay dos equipos con el mismo nombre (p. ej. 2657 y 2658), las marcas pueden
 --     venir de cualquiera y deben seguir entrando.
+--   * `cr_equipos_faceid` se trunca y se recarga con el catálogo vigente: un equipo
+--     reemplazado (p. ej. 2427→2695) desaparece del catálogo. marcas_raw usa LEFT JOIN
+--     y COALESCE(eq.empresa, marc.empresa) para que las marcas históricas del equipo
+--     retirado sigan cruzando por RUT + empresa + ventana ±3 h. Se excluyen
+--     cod_dispositivo nulo o 0 (nunca aportaban con el INNER JOIN previo).
 --   * `equipos_enriq` / `equipos_lw_enriq` = una fila por (nombre, empresa) para el join
 --     de turnos (ult_conexion, instalacion_con_faceid, nuevo_faceid). Criterio:
 --     ult_conexion más reciente (NULL al final), desempate por cod ASC.
@@ -53,7 +58,7 @@ WITH params AS (
   SELECT DATE('2025-10-01') AS fecha_desde
 ),
 
--- Todos los códigos: solo para INNER JOIN de marcas por cod_dispositivo.
+-- Todos los códigos: LEFT JOIN de marcas por cod_dispositivo (fallback empresa en la marca).
 equipos AS (
   SELECT
     eq.nombre,
@@ -90,9 +95,10 @@ equipos_lw_enriq AS (
 ),
 
 -- Solo columnas necesarias; rango de fechas del rol ±1 día (entrada temprana / salida nocturna).
+-- LEFT JOIN al catálogo: si el dispositivo ya no está (reemplazado), empresa viene de la marca.
 marcas_raw AS (
   SELECT
-    eq.empresa,
+    COALESCE(eq.empresa, marc.empresa) AS empresa,
     marc.rut,
     marc.fecha,
     marc.hora,
@@ -103,6 +109,7 @@ marcas_raw AS (
   FROM (
     SELECT
       cod_dispositivo,
+      empresa,
       rut,
       fecha,
       hora,
@@ -113,6 +120,7 @@ marcas_raw AS (
     UNION ALL
     SELECT
       cod_dispositivo,
+      empresa,
       rut,
       fecha,
       hora,
@@ -125,11 +133,14 @@ marcas_raw AS (
       FROM `worldwide-470917.cr_reportes.cr_marcas_face_id_hist`
     )
   ) marc
-  INNER JOIN equipos eq
+  LEFT JOIN equipos eq
     ON eq.cod = marc.cod_dispositivo
   CROSS JOIN params p
   WHERE marc.fecha >= DATE_SUB(p.fecha_desde, INTERVAL 1 DAY)
     AND marc.tipo IN ('Entrada Laboral', 'Salida Laboral')
+    AND marc.cod_dispositivo IS NOT NULL
+    AND marc.cod_dispositivo != 0
+    AND COALESCE(eq.empresa, marc.empresa) IS NOT NULL
 ),
 
 -- Un marcaje físico puede tener varias filas (distinta revision). Deduplicar por clave de marca.

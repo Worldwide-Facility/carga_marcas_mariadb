@@ -501,6 +501,56 @@ def codigos_equipos_para_marcas(equipos: Sequence[EquipoFaceid]) -> set[int]:
     return {e.cod for e in equipos}
 
 
+def resolver_empresa_marca(
+    cod_dispositivo: int | None,
+    empresa_marca: str | None,
+    equipos_por_cod: dict[int, str],
+) -> str | None:
+    """
+    Espejo de marcas_raw tras LEFT JOIN a equipos:
+    COALESCE(eq.empresa, marc.empresa), excluyendo cod nulo/0.
+    Equipo retirado del catálogo (p. ej. 2427 reemplazado por 2695) sigue
+    aportando empresa vía la propia marca para el cruce RUT + empresa + ventana.
+    """
+    if cod_dispositivo is None or cod_dispositivo == 0:
+        return None
+    eq_emp = equipos_por_cod.get(cod_dispositivo)
+    if eq_emp is not None and str(eq_emp).strip():
+        return str(eq_emp).strip()
+    if empresa_marca is not None and str(empresa_marca).strip():
+        return str(empresa_marca).strip()
+    return None
+
+
+def marcas_con_empresa_catalogo(
+    filas: Sequence[tuple[int | None, str | None, FilaMarca]],
+    equipos: Sequence[EquipoFaceid],
+) -> list[FilaMarca]:
+    """
+    Aplica resolver_empresa_marca a filas (cod_dispositivo, empresa_en_marca, FilaMarca).
+    Descarta cod inválido o sin empresa resoluble (mismo filtro que marcas_raw).
+    La FilaMarca.empresa se reemplaza por la empresa resuelta (catálogo o fallback).
+    """
+    por_cod = {e.cod: e.empresa for e in equipos}
+    out: list[FilaMarca] = []
+    for cod, emp_marc, fila in filas:
+        emp = resolver_empresa_marca(cod, emp_marc if emp_marc is not None else fila.empresa, por_cod)
+        if emp is None:
+            continue
+        out.append(
+            FilaMarca(
+                empresa=emp,
+                rut=fila.rut,
+                fecha=fila.fecha,
+                hora=fila.hora,
+                tipo=fila.tipo,
+                revision=fila.revision,
+                motivo_no_uso=fila.motivo_no_uso,
+            )
+        )
+    return out
+
+
 def enriquecer_turno_por_equipos(
     turno: TurnoClave,
     equipos: Sequence[EquipoFaceid],

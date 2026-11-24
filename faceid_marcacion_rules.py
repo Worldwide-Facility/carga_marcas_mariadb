@@ -1,7 +1,8 @@
 """
 Reglas puras del cruce FaceID ↔ turno (espejo de sql/cr_reporte_marcacion_faceid.sql).
 
-No habla con BigQuery: sirve para documentar y testear aceptación, ventana ±3 h y Art. 22.
+No habla con BigQuery: sirve para documentar y testear aceptación, ventana ±3 h, Art. 22
+y la excepción de reemplazo (RUT válidos, sin GPS lejos ni CECOS).
 """
 
 from __future__ import annotations
@@ -71,10 +72,24 @@ class MarcaDedup:
     aceptada: bool
     no_objetada: bool
     motivo_art22: bool
+    excluida_gps_o_cecos: bool
 
 
 def _norm(value: str | None) -> str:
     return (value or "").strip()
+
+
+def motivo_excluido_reemplazo(motivo_no_uso: str | None) -> bool:
+    """True si el motivo es GPS lejos o centro de costo (CECOS)."""
+    mot = motivo_no_uso or ""
+    return "fuera de tolerancia por gps" in mot.lower() or "CECOS" in mot.upper()
+
+
+def ruts_validos_reemplazo(rutasi: object | None, rutrol: object | None) -> bool:
+    """True si ambos RUT tienen ≥ 7 dígitos y son distintos (relevo real, no rutrol corto)."""
+    a = "".join(ch for ch in str(rutasi or "") if ch.isdigit())
+    r = "".join(ch for ch in str(rutrol or "") if ch.isdigit())
+    return len(a) >= 7 and len(r) >= 7 and a != r
 
 
 def deducir_marca(filas: Sequence[FilaMarca]) -> MarcaDedup:
@@ -89,6 +104,7 @@ def deducir_marca(filas: Sequence[FilaMarca]) -> MarcaDedup:
     aceptada = False
     no_objetada = False
     motivo_art22 = False
+    excluida_gps_o_cecos = False
     for f in filas:
         rev = _norm(f.revision)
         mot = _norm(f.motivo_no_uso)
@@ -99,6 +115,8 @@ def deducir_marca(filas: Sequence[FilaMarca]) -> MarcaDedup:
             aceptada = True
         if mot == MOTIVO_ART22:
             motivo_art22 = True
+        if motivo_excluido_reemplazo(mot):
+            excluida_gps_o_cecos = True
 
     return MarcaDedup(
         empresa=base.empresa,
@@ -110,6 +128,7 @@ def deducir_marca(filas: Sequence[FilaMarca]) -> MarcaDedup:
         aceptada=aceptada,
         no_objetada=no_objetada,
         motivo_art22=motivo_art22,
+        excluida_gps_o_cecos=excluida_gps_o_cecos,
     )
 
 
@@ -145,11 +164,15 @@ def en_ventana(marca_ts: datetime, referencia: datetime, ventana: timedelta = VE
 def elegir_marca_lado(
     candidatas: Sequence[MarcaDedup],
     referencia: datetime,
+    *,
+    aceptar_en_revision_reemplazo: bool = False,
 ) -> MarcaDedup | None:
     """
     candidatas: marcas no-Objetadas del tipo correcto ya filtradas por ventana.
-    Prioridad: aceptadas; si ninguna, Art. 22 solo si TODAS tienen motivo Art. 22.
-    Entre válidas, la más cercana a referencia.
+    Prioridad: aceptadas; si ninguna, Art. 22 solo si TODAS tienen motivo Art. 22;
+    si tampoco, y aceptar_en_revision_reemplazo (rutasi ≠ rutrol, ambos ≥ 7 dígitos),
+    las no excluidas por GPS lejos / CECOS. Entre válidas, la más cercana a referencia.
+    Nunca considera marcas de rutrol: el caller solo pasa marcas de rutasi.
     """
     if not candidatas:
         return None
@@ -159,6 +182,10 @@ def elegir_marca_lado(
         pool = aceptadas
     elif all(m.motivo_art22 for m in candidatas):
         pool = list(candidatas)
+    elif aceptar_en_revision_reemplazo:
+        pool = [m for m in candidatas if not m.excluida_gps_o_cecos]
+        if not pool:
+            return None
     else:
         return None
 

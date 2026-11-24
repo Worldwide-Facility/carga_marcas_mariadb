@@ -12,6 +12,13 @@
 --     si alguna fila no-Objetada cumple la condición.
 --   * Excepción Art. 22: si no hay aceptada en la ventana y todas las marcas no-Objetadas de
 --     ese lado en la ventana tienen motivo 'Colaborador Art. 22', se cuenta esa marca.
+--   * Excepción reemplazo: si rutasi ≠ rutrol (ambos con ≥ 7 dígitos, RUT válidos) y no hay
+--     aceptada en la ventana, se cuenta una marca no-Objetada de rutasi (nunca de rutrol)
+--     aunque esté En Revisión, excepto si el motivo es GPS lejos
+--     ('Fuera de tolerancia por GPS', p. ej. 'Está a N mts del punto …') o de centro de
+--     costo (texto 'CECOS': 'CECOS (…) sin geolocalización configurada' y
+--     'Dispositivo sin CECOS configurado para evaluar uso PPC').
+--     'Marcación sin geolocalización obtenida' no se excluye (no es GPS lejos ni CECOS).
 --   * Si hay varias válidas, se elige la más cercana a la hora de referencia (inicio/fin).
 --   * Universo: solo turnos con rutasi no vacío (sin fallback a rutrol) y rutasi
 --     fuera de RUT genéricos ControlRoll ('90000001','90000002','90000009').
@@ -163,7 +170,15 @@ marcas_dedup AS (
     LOGICAL_OR(
       IFNULL(revision, '') != 'Objetada'
       AND IFNULL(motivo_no_uso, '') = 'Colaborador Art. 22'
-    ) AS motivo_art22
+    ) AS motivo_art22,
+    -- GPS lejos o centro de costo (CECOS): no usar en la excepción de reemplazo.
+    LOGICAL_OR(
+      IFNULL(revision, '') != 'Objetada'
+      AND (
+        REGEXP_CONTAINS(LOWER(IFNULL(motivo_no_uso, '')), r'fuera de tolerancia por gps')
+        OR REGEXP_CONTAINS(UPPER(IFNULL(motivo_no_uso, '')), r'CECOS')
+      )
+    ) AS excluida_gps_o_cecos
   FROM marcas_raw
   GROUP BY empresa, rut, fecha, hora, tipo, marca_ts
 ),
@@ -177,7 +192,8 @@ marcas AS (
     tipo,
     marca_ts,
     aceptada,
-    motivo_art22
+    motivo_art22,
+    excluida_gps_o_cecos
   FROM marcas_dedup
   WHERE no_objetada
 ),
@@ -317,6 +333,7 @@ entrada_cands AS (
     m.hora AS hora_marca,
     m.aceptada,
     m.motivo_art22,
+    m.excluida_gps_o_cecos,
     ABS(DATETIME_DIFF(m.marca_ts, t.inicio_turno, SECOND)) AS diferencia
   FROM turnos t
   INNER JOIN marcas m
@@ -348,10 +365,17 @@ entrada_validas AS (
   FROM entrada_flags
   WHERE (hay_aceptada = 1 AND aceptada)
      OR (hay_aceptada = 0 AND todas_art22 = 1)
+     OR (
+          hay_aceptada = 0
+          AND reemplazo = 'SI'
+          AND LENGTH(REGEXP_REPLACE(IFNULL(CAST(rutasi AS STRING), ''), r'[^0-9]', '')) >= 7
+          AND LENGTH(REGEXP_REPLACE(IFNULL(CAST(rutrol AS STRING), ''), r'[^0-9]', '')) >= 7
+          AND NOT excluida_gps_o_cecos
+        )
 ),
 
 entrada_best AS (
-  SELECT * EXCEPT (rn, aceptada, motivo_art22, hay_aceptada, todas_art22)
+  SELECT * EXCEPT (rn, aceptada, motivo_art22, hay_aceptada, todas_art22, excluida_gps_o_cecos)
   FROM (
     SELECT
       v.*,
@@ -385,6 +409,7 @@ salida_cands AS (
     m.hora AS hora_marca,
     m.aceptada,
     m.motivo_art22,
+    m.excluida_gps_o_cecos,
     ABS(DATETIME_DIFF(m.marca_ts, t.fin_turno, SECOND)) AS diferencia
   FROM turnos t
   INNER JOIN marcas m
@@ -416,10 +441,17 @@ salida_validas AS (
   FROM salida_flags
   WHERE (hay_aceptada = 1 AND aceptada)
      OR (hay_aceptada = 0 AND todas_art22 = 1)
+     OR (
+          hay_aceptada = 0
+          AND reemplazo = 'SI'
+          AND LENGTH(REGEXP_REPLACE(IFNULL(CAST(rutasi AS STRING), ''), r'[^0-9]', '')) >= 7
+          AND LENGTH(REGEXP_REPLACE(IFNULL(CAST(rutrol AS STRING), ''), r'[^0-9]', '')) >= 7
+          AND NOT excluida_gps_o_cecos
+        )
 ),
 
 salida_best AS (
-  SELECT * EXCEPT (rn, aceptada, motivo_art22, hay_aceptada, todas_art22)
+  SELECT * EXCEPT (rn, aceptada, motivo_art22, hay_aceptada, todas_art22, excluida_gps_o_cecos)
   FROM (
     SELECT
       v.*,

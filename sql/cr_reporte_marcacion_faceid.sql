@@ -139,7 +139,7 @@ marcas_raw AS (
   WHERE marc.fecha >= DATE_SUB(p.fecha_desde, INTERVAL 1 DAY)
     AND marc.tipo IN ('Entrada Laboral', 'Salida Laboral')
     AND marc.cod_dispositivo IS NOT NULL
-    AND marc.cod_dispositivo != 0
+    AND marc.cod_dispositivo != '0'
     AND COALESCE(eq.empresa, marc.empresa) IS NOT NULL
 ),
 

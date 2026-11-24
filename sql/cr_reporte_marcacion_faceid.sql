@@ -1,10 +1,29 @@
 -- worldwide-470917.cr_vistas_reporte.cr_reporte_marcacion_faceid
 -- Turnos del histórico de asistencia cruzados con las marcas FaceID de entrada y salida.
 --
+-- DDL aplicado en producción el 24-11-2026 (CREATE OR REPLACE ejecutado por Diego).
+-- Este archivo espeja esa vista. Parte de PR #9 (reemplazo) y PR #10
+-- ('Sin entrada laboral registrada') y suma tres cambios:
+--   (a) Ventana de marca por tramo de cobertura del rutasi, no por her/hsr planificados.
+--   (b) Exclusividad: una misma marca aplica como máximo a un turno.
+--   (c) Excepción de reemplazo: 7 o más dígitos solo en rutasi (se quita el largo de rutrol).
+-- her y hsr se siguen mostrando con el horario planificado completo; la ventana ±3 h
+-- usa inicio_marca / fin_marca.
+--
 -- Regla de cruce (empresa + rutasi):
---   * Entrada laboral: timestamp de la marca dentro de ±3 h del inicio del turno (her en fecha dia).
---   * Salida laboral: timestamp dentro de ±3 h del fin del turno (hsr); si TIME(hsr) <= TIME(her)
---     el fin se calcula al día siguiente (turno nocturno que cruza medianoche).
+--   * Entrada laboral: timestamp de la marca dentro de ±3 h de inicio_marca.
+--   * Salida laboral: timestamp dentro de ±3 h de fin_marca.
+--   * inicio_marca / fin_marca se derivan así (fuente más fiable primero):
+--       1) tramo del rutasi en el texto `relevo` (formato 'RUT | 3:00PM / 7:00PM | NOMBRE',
+--          tramos unidos por ' || '). Se normaliza '0:xxAM/PM' → '12:xx' (typo 12 h).
+--          Se acepta el tramo solo si ambos extremos quedan a ≤ 3 h del her/entrada
+--          y del hsr/salida (si no, el parseo typo no se usa).
+--       2) Si no hay tramo fiable: entrada y salida de cr_asistencia_hist_tb
+--          (ambos presentes). Ojo: esos campos agregan todos los tramos, no solo
+--          el del rutasi, por eso el relevo es la fuente preferida.
+--       3) Si no hay segmento: her / hsr planificados (si TIME(hsr) <= TIME(her),
+--          el fin se calcula al día siguiente).
+--   * hr_consi_* no se usa: también vienen agregados y son menos directos que el tramo.
 --   * Se excluyen colaciones (Inicio/Término Colación).
 --   * Aceptación: revision = 'Correcta' O motivo_no_uso = 'Marca Utilizada Correctamente',
 --     excepto revision = 'Objetada' (nunca cuenta). El hist puede repetir el mismo marcaje
@@ -12,8 +31,9 @@
 --     si alguna fila no-Objetada cumple la condición.
 --   * Excepción Art. 22: si no hay aceptada en la ventana y todas las marcas no-Objetadas de
 --     ese lado en la ventana tienen motivo 'Colaborador Art. 22', se cuenta esa marca.
---   * Excepción reemplazo: si rutasi ≠ rutrol (ambos con ≥ 7 dígitos, RUT válidos) y no hay
---     aceptada en la ventana, se cuenta una marca no-Objetada de rutasi (nunca de rutrol)
+--   * Excepción reemplazo: si rutasi ≠ rutrol y rutasi tiene ≥ 7 dígitos (RUT válido;
+--     no se exige largo de rutrol) y no hay aceptada en la ventana, se cuenta una
+--     marca no-Objetada de rutasi (nunca de rutrol)
 --     aunque esté En Revisión, excepto si el motivo es GPS lejos
 --     ('Fuera de tolerancia por GPS', p. ej. 'Está a N mts del punto …') o de centro de
 --     costo (texto 'CECOS': 'CECOS (…) sin geolocalización configurada' y
@@ -21,10 +41,14 @@
 --     'Marcación sin geolocalización obtenida' no se excluye (no es GPS lejos ni CECOS).
 --   * Excepción salida 'Sin entrada laboral registrada': si no hay aceptada en la
 --     ventana de salida, se cuenta una marca no-Objetada de rutasi (nunca de rutrol)
---     con ese motivo (con o sin punto final) que caiga en ±3 h de hsr. Solo aplica
+--     con ese motivo (con o sin punto final) que caiga en ±3 h de fin_marca. Solo aplica
 --     en salida_validas, en todos los turnos (no solo reemplazos). No se usa en
 --     entrada_validas.
---   * Si hay varias válidas, se elige la más cercana a la hora de referencia (inicio/fin).
+--   * Si hay varias válidas en un turno, se elige la más cercana a inicio_marca / fin_marca.
+--   * Exclusividad: una marca (rutasi + empresa + timestamp, por lado) se asigna a un
+--     solo turno. Gana el de menor |marca - inicio/fin_marca|; en empate, el turno
+--     propio (reemplazo='NO') sobre el reemplazo; luego her, instalacion_rol, rutrol.
+--     El perdedor puede usar su siguiente candidata válida, o queda sin marca.
 --   * Universo: solo turnos con rutasi no vacío (sin fallback a rutrol) y rutasi
 --     fuera de RUT genéricos ControlRoll ('90000001','90000002','90000009').
 --
@@ -258,7 +282,10 @@ pre_int AS (
     hist.empresa,
     hist.inst_esporadica,
     hist.equip_faceid,
-    hist.tipo
+    hist.tipo,
+    hist.relevo,
+    hist.entrada,
+    hist.salida
   FROM `worldwide-470917.cr_reportes.cr_asistencia_hist_tb` hist
   CROSS JOIN params p
   WHERE DATE(hist.dia) >= p.fecha_desde
@@ -282,7 +309,67 @@ pre_int AS (
   ) = 1
 ),
 
-turnos AS (
+-- Tramo de cobertura del rutasi, parseado desde relevo.
+-- No se usa como ventana si falla el sanity de ±3 h respecto de her/entrada y hsr/salida.
+tramo_rutasi AS (
+  SELECT
+    p.dia,
+    p.instalacion_rol,
+    p.empresa,
+    p.rutasi,
+    p.rutrol,
+    p.her,
+    p.hsr,
+    (SELECT COALESCE(
+            SAFE.PARSE_TIME('%I:%M%p', CASE
+              WHEN REGEXP_CONTAINS(t, r'^0:') THEN REGEXP_REPLACE(t, r'^0:', '12:')
+              WHEN REGEXP_CONTAINS(t, r'^[0-9]:') THEN CONCAT('0', t)
+              ELSE t
+            END),
+            SAFE.PARSE_TIME('%H:%M', TRIM(s)),
+            SAFE.PARSE_TIME('%H:%M:%S', TRIM(s))
+          )
+          FROM (
+            SELECT
+              TRIM(SPLIT(TRIM(SPLIT(TRIM(seg), ' | ')[SAFE_OFFSET(1)]), '/')[SAFE_OFFSET(0)]) AS s,
+              REGEXP_REPLACE(
+                UPPER(IFNULL(TRIM(SPLIT(TRIM(SPLIT(TRIM(seg), ' | ')[SAFE_OFFSET(1)]), '/')[SAFE_OFFSET(0)]), '')),
+                r'[^0-9APM:]',
+                ''
+              ) AS t
+          )) AS t_ini,
+    (SELECT COALESCE(
+            SAFE.PARSE_TIME('%I:%M%p', CASE
+              WHEN REGEXP_CONTAINS(t, r'^0:') THEN REGEXP_REPLACE(t, r'^0:', '12:')
+              WHEN REGEXP_CONTAINS(t, r'^[0-9]:') THEN CONCAT('0', t)
+              ELSE t
+            END),
+            SAFE.PARSE_TIME('%H:%M', TRIM(s)),
+            SAFE.PARSE_TIME('%H:%M:%S', TRIM(s))
+          )
+          FROM (
+            SELECT
+              TRIM(SPLIT(TRIM(SPLIT(TRIM(seg), ' | ')[SAFE_OFFSET(1)]), '/')[SAFE_OFFSET(1)]) AS s,
+              REGEXP_REPLACE(
+                UPPER(IFNULL(TRIM(SPLIT(TRIM(SPLIT(TRIM(seg), ' | ')[SAFE_OFFSET(1)]), '/')[SAFE_OFFSET(1)]), '')),
+                r'[^0-9APM:]',
+                ''
+              ) AS t
+          )) AS t_fin
+  FROM pre_int p
+  CROSS JOIN UNNEST(SPLIT(IFNULL(p.relevo, ''), ' || ')) AS seg
+  WHERE REGEXP_REPLACE(
+          IFNULL(TRIM(SPLIT(TRIM(seg), ' | ')[SAFE_OFFSET(0)]), ''),
+          r'[^0-9]',
+          ''
+        ) = REGEXP_REPLACE(IFNULL(CAST(p.rutasi AS STRING), ''), r'[^0-9]', '')
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY p.dia, p.instalacion_rol, p.empresa, p.rutasi, p.rutrol, p.her, p.hsr
+    ORDER BY TRIM(SPLIT(TRIM(seg), ' | ')[SAFE_OFFSET(1)])
+  ) = 1
+),
+
+turnos_base AS (
   SELECT
     hist.dia,
     hist.cliente_rol,
@@ -299,6 +386,8 @@ turnos AS (
     DATETIME(hist.hsr) AS hsr,
     hist.empresa,
     hist.inst_esporadica,
+    hist.entrada,
+    hist.salida,
     (
       CASE
         WHEN eq_lw.nombre IS NULL AND eq.nombre IS NOT NULL THEN hist.instalacion_rol
@@ -312,7 +401,19 @@ turnos AS (
           THEN DATETIME(DATE_ADD(DATE(hist.dia), INTERVAL 1 DAY), TIME(DATETIME(hist.hsr)))
         ELSE DATETIME(DATE(hist.dia), TIME(DATETIME(hist.hsr)))
       END
-    ) AS fin_turno
+    ) AS fin_turno,
+    CASE
+      WHEN tr.t_ini IS NOT NULL
+        THEN DATETIME(DATE(hist.dia), tr.t_ini)
+    END AS tramo_ini,
+    CASE
+      WHEN tr.t_ini IS NOT NULL AND tr.t_fin IS NOT NULL THEN
+        CASE
+          WHEN tr.t_fin <= tr.t_ini
+            THEN DATETIME(DATE_ADD(DATE(hist.dia), INTERVAL 1 DAY), tr.t_fin)
+          ELSE DATETIME(DATE(hist.dia), tr.t_fin)
+        END
+    END AS tramo_fin
   FROM pre_int hist
   -- Enriquecimiento: una sola fila por (nombre, empresa). Marcas siguen usando `equipos` (todos los cod).
   LEFT JOIN equipos_enriq eq
@@ -321,10 +422,57 @@ turnos AS (
   LEFT JOIN equipos_lw_enriq eq_lw
     ON hist.equip_faceid = eq_lw.nombre
    AND hist.empresa = eq_lw.empresa
+  LEFT JOIN tramo_rutasi tr
+    ON hist.dia = tr.dia
+   AND hist.instalacion_rol = tr.instalacion_rol
+   AND hist.empresa = tr.empresa
+   AND hist.rutasi = tr.rutasi
+   AND hist.rutrol = tr.rutrol
+   AND hist.her = tr.her
+   AND hist.hsr = tr.hsr
   WHERE hist.rutasi IS NOT NULL
     AND CAST(hist.rutasi AS STRING) <> ''
     AND CAST(hist.rutasi AS STRING) NOT IN ('90000001', '90000002', '90000009')
 ),
+
+-- inicio_marca / fin_marca: ventana de cruce. her / hsr / inicio_turno / fin_turno
+-- conservan el horario planificado (lo que se muestra).
+turnos AS (
+  SELECT
+    * EXCEPT (entrada, salida, tramo_ini, tramo_fin),
+    CASE
+      WHEN tramo_ini IS NOT NULL
+       AND tramo_fin IS NOT NULL
+       AND (
+         ABS(DATETIME_DIFF(tramo_ini, inicio_turno, MINUTE)) <= 180
+         OR (entrada IS NOT NULL AND ABS(DATETIME_DIFF(tramo_ini, DATETIME(entrada), MINUTE)) <= 180)
+       )
+       AND (
+         ABS(DATETIME_DIFF(tramo_fin, fin_turno, MINUTE)) <= 180
+         OR (salida IS NOT NULL AND ABS(DATETIME_DIFF(tramo_fin, DATETIME(salida), MINUTE)) <= 180)
+       )
+        THEN tramo_ini
+      WHEN entrada IS NOT NULL AND salida IS NOT NULL THEN DATETIME(entrada)
+      ELSE inicio_turno
+    END AS inicio_marca,
+    CASE
+      WHEN tramo_ini IS NOT NULL
+       AND tramo_fin IS NOT NULL
+       AND (
+         ABS(DATETIME_DIFF(tramo_ini, inicio_turno, MINUTE)) <= 180
+         OR (entrada IS NOT NULL AND ABS(DATETIME_DIFF(tramo_ini, DATETIME(entrada), MINUTE)) <= 180)
+       )
+       AND (
+         ABS(DATETIME_DIFF(tramo_fin, fin_turno, MINUTE)) <= 180
+         OR (salida IS NOT NULL AND ABS(DATETIME_DIFF(tramo_fin, DATETIME(salida), MINUTE)) <= 180)
+       )
+        THEN tramo_fin
+      WHEN entrada IS NOT NULL AND salida IS NOT NULL THEN DATETIME(salida)
+      ELSE fin_turno
+    END AS fin_marca
+  FROM turnos_base
+),
+
 
 entrada_cands AS (
   SELECT
@@ -346,14 +494,15 @@ entrada_cands AS (
     m.aceptada,
     m.motivo_art22,
     m.excluida_gps_o_cecos,
-    ABS(DATETIME_DIFF(m.marca_ts, t.inicio_turno, SECOND)) AS diferencia
+    m.marca_ts,
+    ABS(DATETIME_DIFF(m.marca_ts, t.inicio_marca, SECOND)) AS diferencia
   FROM turnos t
   INNER JOIN marcas m
     ON t.empresa = m.empresa
    AND t.rutasi = m.rut
    AND m.tipo = 'Entrada Laboral'
-   AND m.marca_ts BETWEEN DATETIME_SUB(t.inicio_turno, INTERVAL 3 HOUR)
-                      AND DATETIME_ADD(t.inicio_turno, INTERVAL 3 HOUR)
+   AND m.marca_ts BETWEEN DATETIME_SUB(t.inicio_marca, INTERVAL 3 HOUR)
+                      AND DATETIME_ADD(t.inicio_marca, INTERVAL 3 HOUR)
 ),
 
 entrada_flags AS (
@@ -381,13 +530,26 @@ entrada_validas AS (
           hay_aceptada = 0
           AND reemplazo = 'SI'
           AND LENGTH(REGEXP_REPLACE(IFNULL(CAST(rutasi AS STRING), ''), r'[^0-9]', '')) >= 7
-          AND LENGTH(REGEXP_REPLACE(IFNULL(CAST(rutrol AS STRING), ''), r'[^0-9]', '')) >= 7
           AND NOT excluida_gps_o_cecos
         )
 ),
 
+entrada_exclusivas AS (
+  SELECT *
+  FROM entrada_validas
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY rutasi, empresa, marca_ts
+    ORDER BY
+      diferencia ASC,
+      CASE WHEN reemplazo = 'NO' THEN 0 ELSE 1 END,
+      her,
+      instalacion_rol,
+      CAST(rutrol AS STRING)
+  ) = 1
+),
+
 entrada_best AS (
-  SELECT * EXCEPT (rn, aceptada, motivo_art22, hay_aceptada, todas_art22, excluida_gps_o_cecos)
+  SELECT * EXCEPT (rn, aceptada, motivo_art22, hay_aceptada, todas_art22, excluida_gps_o_cecos, marca_ts)
   FROM (
     SELECT
       v.*,
@@ -397,7 +559,7 @@ entrada_best AS (
           v.rutrol, v.rutasi, v.reemplazo, v.cargo, v.turno, v.her, v.hsr, v.empresa
         ORDER BY v.diferencia ASC
       ) AS rn
-    FROM entrada_validas v
+    FROM entrada_exclusivas v
   )
   WHERE rn = 1
 ),
@@ -423,14 +585,15 @@ salida_cands AS (
     m.motivo_art22,
     m.excluida_gps_o_cecos,
     m.motivo_sin_entrada,
-    ABS(DATETIME_DIFF(m.marca_ts, t.fin_turno, SECOND)) AS diferencia
+    m.marca_ts,
+    ABS(DATETIME_DIFF(m.marca_ts, t.fin_marca, SECOND)) AS diferencia
   FROM turnos t
   INNER JOIN marcas m
     ON t.empresa = m.empresa
    AND t.rutasi = m.rut
    AND m.tipo = 'Salida Laboral'
-   AND m.marca_ts BETWEEN DATETIME_SUB(t.fin_turno, INTERVAL 3 HOUR)
-                      AND DATETIME_ADD(t.fin_turno, INTERVAL 3 HOUR)
+   AND m.marca_ts BETWEEN DATETIME_SUB(t.fin_marca, INTERVAL 3 HOUR)
+                      AND DATETIME_ADD(t.fin_marca, INTERVAL 3 HOUR)
 ),
 
 salida_flags AS (
@@ -458,14 +621,27 @@ salida_validas AS (
           hay_aceptada = 0
           AND reemplazo = 'SI'
           AND LENGTH(REGEXP_REPLACE(IFNULL(CAST(rutasi AS STRING), ''), r'[^0-9]', '')) >= 7
-          AND LENGTH(REGEXP_REPLACE(IFNULL(CAST(rutrol AS STRING), ''), r'[^0-9]', '')) >= 7
           AND NOT excluida_gps_o_cecos
         )
      OR (hay_aceptada = 0 AND motivo_sin_entrada)
 ),
 
+salida_exclusivas AS (
+  SELECT *
+  FROM salida_validas
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY rutasi, empresa, marca_ts
+    ORDER BY
+      diferencia ASC,
+      CASE WHEN reemplazo = 'NO' THEN 0 ELSE 1 END,
+      her,
+      instalacion_rol,
+      CAST(rutrol AS STRING)
+  ) = 1
+),
+
 salida_best AS (
-  SELECT * EXCEPT (rn, aceptada, motivo_art22, hay_aceptada, todas_art22, excluida_gps_o_cecos, motivo_sin_entrada)
+  SELECT * EXCEPT (rn, aceptada, motivo_art22, hay_aceptada, todas_art22, excluida_gps_o_cecos, motivo_sin_entrada, marca_ts)
   FROM (
     SELECT
       v.*,
@@ -475,7 +651,7 @@ salida_best AS (
           v.rutrol, v.rutasi, v.reemplazo, v.cargo, v.turno, v.her, v.hsr, v.empresa
         ORDER BY v.diferencia ASC
       ) AS rn
-    FROM salida_validas v
+    FROM salida_exclusivas v
   )
   WHERE rn = 1
 ),
